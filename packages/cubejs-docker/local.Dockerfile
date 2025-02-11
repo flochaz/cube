@@ -1,4 +1,4 @@
-ARG DEV_BUILD_IMAGE=cubejs/cube:build
+ARG DEV_BUILD_IMAGE=cubejs/cube:dev
 
 FROM $DEV_BUILD_IMAGE as build
 FROM node:20.17.0-bookworm-slim
@@ -22,8 +22,8 @@ COPY . .
 # npm, but rather copies all the artifacts from the dev image and links them to
 # the /cube directory
 COPY --from=build /cubejs /cube-build
-RUN cd /cube-build && yarn run link:dev
-COPY package.json.local package.json
+RUN cd /cube-build
+# COPY package.json.local package.json
 
 RUN yarn policies set-version v1.22.22
 # Yarn v1 uses aggressive timeouts with summing time spending on fs, https://github.com/yarnpkg/yarn/issues/4890
@@ -36,7 +36,8 @@ RUN apt-get update \
 
 # We are copying root yarn.lock file to the context folder during the Publish GH
 # action. So, a process will use the root lock file here.
-RUN yarn install --prod && yarn cache clean && yarn link:dev
+RUN yarn install --prod && yarn cache clean
+# RUN yarn link:dev
 
 # By default Node dont search in parent directory from /cube/conf, @todo Reaserch a little bit more
 ENV NODE_PATH /cube/conf/node_modules:/cube/node_modules
