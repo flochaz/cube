@@ -67,8 +67,8 @@ COPY packages/cubejs-api-gateway/package.json packages/cubejs-api-gateway/packag
 # COPY packages/cubejs-pinot-driver/package.json packages/cubejs-pinot-driver/package.json
 # COPY packages/cubejs-query-orchestrator/package.json packages/cubejs-query-orchestrator/package.json
 # COPY packages/cubejs-schema-compiler/package.json packages/cubejs-schema-compiler/package.json
-COPY packages/cubejs-server/package.json packages/cubejs-server/package.json
-COPY packages/cubejs-server-core/package.json packages/cubejs-server-core/package.json
+# COPY packages/cubejs-server/package.json packages/cubejs-server/package.json
+# COPY packages/cubejs-server-core/package.json packages/cubejs-server-core/package.json
 # COPY packages/cubejs-snowflake-driver/package.json packages/cubejs-snowflake-driver/package.json
 # COPY packages/cubejs-sqlite-driver/package.json packages/cubejs-sqlite-driver/package.json
 # COPY packages/cubejs-ksql-driver/package.json packages/cubejs-ksql-driver/package.json
@@ -79,7 +79,7 @@ COPY packages/cubejs-server-core/package.json packages/cubejs-server-core/packag
 # COPY packages/cubejs-testing/package.json packages/cubejs-testing/package.json
 # COPY packages/cubejs-docker/package.json packages/cubejs-docker/package.json
 # Frontend
-COPY packages/cubejs-templates/package.json packages/cubejs-templates/package.json
+# COPY packages/cubejs-templates/package.json packages/cubejs-templates/package.json
 COPY packages/cubejs-client-core/package.json packages/cubejs-client-core/package.json
 COPY packages/cubejs-client-react/package.json packages/cubejs-client-react/package.json
 COPY packages/cubejs-client-vue/package.json packages/cubejs-client-vue/package.json
@@ -144,8 +144,8 @@ COPY packages/cubejs-api-gateway/ packages/cubejs-api-gateway/
 # COPY packages/cubejs-pinot-driver/ packages/cubejs-pinot-driver/
 # COPY packages/cubejs-query-orchestrator/ packages/cubejs-query-orchestrator/
 # COPY packages/cubejs-schema-compiler/ packages/cubejs-schema-compiler/
-COPY packages/cubejs-server/ packages/cubejs-server/
-COPY packages/cubejs-server-core/ packages/cubejs-server-core/
+# COPY packages/cubejs-server/ packages/cubejs-server/
+# COPY packages/cubejs-server-core/ packages/cubejs-server-core/
 # COPY packages/cubejs-snowflake-driver/ packages/cubejs-snowflake-driver/
 # COPY packages/cubejs-sqlite-driver/ packages/cubejs-sqlite-driver/
 # COPY packages/cubejs-ksql-driver/ packages/cubejs-ksql-driver/
@@ -157,7 +157,7 @@ COPY packages/cubejs-server-core/ packages/cubejs-server-core/
 # # COPY packages/cubejs-testing/ packages/cubejs-testing/
 # # COPY packages/cubejs-docker/ packages/cubejs-docker/
 # # Frontend
-COPY packages/cubejs-templates/ packages/cubejs-templates/
+# COPY packages/cubejs-templates/ packages/cubejs-templates/
 COPY packages/cubejs-client-core/ packages/cubejs-client-core/
 COPY packages/cubejs-client-react/ packages/cubejs-client-react/
 COPY packages/cubejs-client-vue/ packages/cubejs-client-vue/
