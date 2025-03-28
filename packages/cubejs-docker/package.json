@@ -8,6 +8,9 @@
   "engines": {
     "node": "^14.0.0 || ^16.0.0 || >=17.0.0"
   },
+  "scripts": {
+    "link:dev": "cd packages && cd ./cubejs-api-gateway && yarn link"
+  },
   "dependencies": {
     "@cubejs-backend/athena-driver": "1.2.3",
     "@cubejs-backend/bigquery-driver": "1.2.3",
