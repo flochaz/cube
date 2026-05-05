@@ -25,6 +25,8 @@ use tokio::{
 };
 use uuid::Uuid;
 
+use crate::compile::engine::df::scan::CacheMode;
+use crate::transport::TransportLoadRequestCacheMode;
 use crate::{
     compile::{
         engine::df::{
@@ -142,6 +144,7 @@ pub trait TransportService: Send + Sync + Debug {
         meta_fields: LoadRequestMeta,
         schema: SchemaRef,
         member_fields: Vec<MemberField>,
+        cache_mode: Option<CacheMode>,
     ) -> Result<Vec<RecordBatch>, CubeError>;
 
     async fn load_stream(
@@ -282,6 +285,7 @@ impl TransportService for HttpTransport {
         meta: LoadRequestMeta,
         schema: SchemaRef,
         member_fields: Vec<MemberField>,
+        cache_mode: Option<CacheMode>,
     ) -> Result<Vec<RecordBatch>, CubeError> {
         if meta.change_user().is_some() {
             return Err(CubeError::internal(
@@ -290,10 +294,23 @@ impl TransportService for HttpTransport {
             ));
         }
 
+        let cache_mode = match cache_mode {
+            None => None,
+            Some(m) => match m {
+                CacheMode::StaleIfSlow => Some(TransportLoadRequestCacheMode::StaleIfSlow),
+                CacheMode::StaleWhileRevalidate => {
+                    Some(TransportLoadRequestCacheMode::StaleWhileRevalidate)
+                }
+                CacheMode::MustRevalidate => Some(TransportLoadRequestCacheMode::MustRevalidate),
+                CacheMode::NoCache => Some(TransportLoadRequestCacheMode::NoCache),
+            },
+        };
+
         // TODO: support meta_fields for HTTP
         let request = TransportLoadRequest {
             query: Some(query),
             query_type: Some("multi".to_string()),
+            cache: cache_mode,
         };
         let response =
             cube_api::load_v1(&self.get_client_config_for_ctx(ctx), Some(request)).await?;
@@ -402,6 +419,7 @@ impl SqlTemplates {
         group_by: Vec<AliasedColumn>,
         group_descs: Vec<Option<GroupingSetDesc>>,
         aggregate: Vec<AliasedColumn>,
+        window: Vec<AliasedColumn>,
         alias: String,
         filter: Option<String>,
         _having: Option<String>,
@@ -412,11 +430,13 @@ impl SqlTemplates {
     ) -> Result<String, CubeError> {
         let group_by = self.to_template_columns(group_by)?;
         let aggregate = self.to_template_columns(aggregate)?;
+        let window = self.to_template_columns(window)?;
         let projection = self.to_template_columns(projection)?;
         let order_by = self.to_template_columns(order_by)?;
         let select_concat = group_by
             .iter()
             .chain(aggregate.iter())
+            .chain(window.iter())
             .chain(projection.iter())
             .cloned()
             .collect::<Vec<_>>();
@@ -437,6 +457,7 @@ impl SqlTemplates {
                 select_concat => select_concat,
                 group_by => group_by_expr,
                 aggregate => aggregate,
+                window => window,
                 projection => projection,
                 order_by => order_by,
                 filter => filter,
@@ -544,12 +565,22 @@ impl SqlTemplates {
         aggregate_function: AggregateFunction,
         args: Vec<String>,
         distinct: bool,
+        within_group: Vec<String>,
     ) -> Result<String, CubeError> {
         let function = self.aggregate_function_name(aggregate_function, distinct);
         let args_concat = args.join(", ");
-        self.render_template(
+        let sql = self.render_template(
             &format!("functions/{}", function),
             context! { args_concat => args_concat, args => args, distinct => distinct },
+        )?;
+        if within_group.len() == 0 {
+            return Ok(sql);
+        }
+
+        let within_group_concat = within_group.join(", ");
+        self.render_template(
+            "expressions/within_group",
+            context! { fun_sql => sql, within_group_concat => within_group_concat },
         )
     }
 
@@ -867,6 +898,24 @@ impl SqlTemplates {
         self.render_template(
             "expressions/like_escape",
             context! { like_expr => rendered_like, escape_char => escape_char },
+        )
+    }
+
+    pub fn between_expr(
+        &self,
+        expr: String,
+        negated: bool,
+        low: String,
+        high: String,
+    ) -> Result<String, CubeError> {
+        self.render_template(
+            "expressions/between",
+            context! {
+                expr => expr,
+                negated => negated,
+                low => low,
+                high => high
+            },
         )
     }
 

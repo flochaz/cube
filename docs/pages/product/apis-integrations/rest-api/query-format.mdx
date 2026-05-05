@@ -1,8 +1,3 @@
----
-redirect_from:
-  - /query-format
----
-
 # Query format in the REST API
 
 Queries to the REST API are plain JavaScript objects, describing an analytics
@@ -39,10 +34,11 @@ The default value is `false`.
 - `offset`: The number of initial rows to be skipped for your query. The default
   value is `0`.
 - `order`: An object, where the keys are measures or dimensions to order by and
-  their corresponding values are either `asc` or `desc`. The order of the fields
-  to order on is based on the order of the keys in the object. If not provided,
-  [default ordering][ref-default-order] is applied. If an empty object (`[]`) is
-  provided, no ordering is applied.
+  their corresponding values are either `asc` or `desc`. For [time dimensions][ref-default-granularities],
+  a granularity can be optionally provided, e.g., `orders.created_at.month`.
+  The order of the fields to order on is based on the order of the keys in the object.
+  If not provided, the [default ordering][ref-default-order] is applied.
+  If an empty object (`[]`) is provided, no ordering is applied.
 - `timezone`: A [time zone][ref-time-zone] for your query. You can set the
 desired time zone in the [TZ Database Name](https://en.wikipedia.org/wiki/Tz_database)
 format, e.g., `America/Los_Angeles`.
@@ -53,12 +49,20 @@ format, e.g., `America/Los_Angeles`.
   [`refreshKey.every`][ref-schema-ref-preaggs-refreshkey-every]) doesn't
   indicate that there's a need for an update this setting has no effect. The
   default value is `false`.
-  > **NOTE**: Cube provides only eventual consistency guarantee. Using a small
-  > [`refreshKey.every`][ref-schema-ref-preaggs-refreshkey-every] value together
-  > with `renewQuery` to achieve immediate consistency can lead to endless
-  > refresh loops and overall system instability.
+
+<InfoBox>
+
+Cube provides only eventual consistency guarantee. Using a small
+[`refreshKey.every`][ref-schema-ref-preaggs-refreshkey-every] value together
+with `renewQuery` to achieve immediate consistency can lead to endless
+refresh loops and overall system instability.
+
+</InfoBox>
+
 - `ungrouped`: If set to `true`, Cube will run an [ungrouped
 query][ref-ungrouped-query].
+- `joinHints`: Query-time [join hints][ref-join-hints], provided as an array of
+two-element arrays of cube names.
 
 ```json
 {
@@ -139,7 +143,7 @@ results after the measure has been calculated.
 
 Only some operators are available for measures. For dimensions, the available
 operators depend on the
-[type of the dimension](/reference/data-model/types-and-formats#dimension-types).
+[type of the dimension](/product/data-modeling/reference/types-and-formats#dimension-types).
 
 ### `equals`
 
@@ -375,9 +379,9 @@ use [timeDimensions](#time-dimensions-format) `dateRange` instead.
 </WarningBox>
 
 The operator `inDateRange` is used to filter a time dimension into a specific
-date range. The values must be an array of dates with the following format
-'YYYY-MM-DD'. If only one date specified the filter would be set exactly to this
-date.
+date range. The values must be an array of timestamps in the [ISO 8601][wiki-iso-8601]
+format, for example `2025-01-02` or `2025-01-02T03:04:05.067Z`. If only one timestamp
+is specified, the filter would be set exactly to this timestamp.
 
 There is a convenient way to use date filters with grouping -
 [learn more about the `timeDimensions` property here](#time-dimensions-format)
@@ -405,7 +409,7 @@ is just missing the filtered time dimension in
 </WarningBox>
 
 An opposite operator to `inDateRange`, use it when you want to exclude specific
-dates. The values format is the same as for `inDateRange`.
+timestamps. The values must be in the same format as for [`inDateRange`](#indaterange).
 
 - Dimension types: `time`.
 
@@ -429,8 +433,8 @@ just missing the filtered time dimension in
 
 </WarningBox>
 
-Use it when you want to retrieve all results before some specific date. The
-values should be an array of one element in `YYYY-MM-DD` format.
+Use it when you want to retrieve all results before some specific timestamp. The
+values should be an array of one element in the same format as for [`inDateRange`](#indaterange).
 
 - Dimension types: `time`.
 
@@ -438,6 +442,31 @@ values should be an array of one element in `YYYY-MM-DD` format.
 {
   "member": "posts.time",
   "operator": "beforeDate",
+  "values": ["2015-01-01"]
+}
+```
+
+### `beforeOrOnDate`
+
+<WarningBox>
+
+From a pre-aggregation standpoint, `beforeOrOnDate` filter is applied as a generic
+filter. All pre-aggregation granularity matching rules aren't applied in this
+case. It feels like pre-aggregation isn't matched. However, pre-aggregation is
+just missing the filtered time dimension in
+[dimensions][ref-schema-ref-preaggs-dimensions] list.
+
+</WarningBox>
+
+Use it when you want to retrieve all results before or on a specific timestamp. The
+values should be an array of one element in the same format as for [`inDateRange`](#indaterange).
+
+- Dimension types: `time`.
+
+```json
+{
+  "member": "posts.time",
+  "operator": "beforeOrOnDate",
   "values": ["2015-01-01"]
 }
 ```
@@ -454,7 +483,8 @@ just missing the filtered time dimension in
 
 </WarningBox>
 
-The same as `beforeDate`, but is used to get all results after a specific date.
+The same as `beforeDate`, but is used to get all results after a specific timestamp.
+The values should be an array of one element in the same format as for [`inDateRange`](#indaterange).
 
 - Dimension types: `time`.
 
@@ -462,6 +492,31 @@ The same as `beforeDate`, but is used to get all results after a specific date.
 {
   "member": "posts.time",
   "operator": "afterDate",
+  "values": ["2015-01-01"]
+}
+```
+
+### `afterOrOnDate`
+
+<WarningBox>
+
+From a pre-aggregation standpoint, `afterOrOnDate` filter is applied as a generic
+filter. All pre-aggregation granularity matching rules aren't applied in this
+case. It feels like pre-aggregation isn't matched. However, pre-aggregation is
+just missing the filtered time dimension in
+[dimensions][ref-schema-ref-preaggs-dimensions] list.
+
+</WarningBox>
+
+The same as `beforeOrOnDate`, but is used to get all results after or on a specific timestamp.
+The values should be an array of one element in the same format as for [`inDateRange`](#indaterange).
+
+- Dimension types: `time`.
+
+```json
+{
+  "member": "posts.time",
+  "operator": "afterOrOnDate",
   "values": ["2015-01-01"]
 }
 ```
@@ -577,10 +632,10 @@ const resultSet = await cubeApi.load({
     {
       dimension: "stories.time",
       compareDateRange: ["this week", ["2020-05-21", "2020-05-28"]],
-      granularity: "month",
-    },
-  ],
-});
+      granularity: "month"
+    }
+  ]
+})
 ```
 
 ### Relative date range
@@ -618,13 +673,13 @@ refer to its documentation for more examples.
 
 [ref-client-core-resultset-drilldown]: /product/apis-integrations/javascript-sdk/reference/cubejs-client-core#drilldown
 [ref-schema-ref-preaggs-refreshkey]:
-  /reference/data-model/pre-aggregations#refresh_key
+  /product/data-modeling/reference/pre-aggregations#refresh_key
 [ref-schema-ref-preaggs-refreshkey-every]:
-  /reference/data-model/pre-aggregations#every
+  /product/data-modeling/reference/pre-aggregations#every
 [ref-schema-ref-preaggs-dimensions]:
-  /reference/data-model/pre-aggregations#dimensions
+  /product/data-modeling/reference/pre-aggregations#dimensions
 [ref-schema-ref-preaggs-time-dimension]:
-  /reference/data-model/pre-aggregations#time_dimension
+  /product/data-modeling/reference/pre-aggregations#time_dimension
 [ref-relative-date-range]: #relative-date-range
 [chrono-website]: https://github.com/wanasit/chrono
 [ref-row-limit]: /product/apis-integrations/queries#row-limit
@@ -634,4 +689,6 @@ refer to its documentation for more examples.
 [ref-ungrouped-query]: /product/apis-integrations/queries#ungrouped-query
 [ref-default-order]: /product/apis-integrations/queries#order
 [ref-default-granularities]: /product/data-modeling/concepts#time-dimensions
-[ref-custom-granularities]: /reference/data-model/dimensions#granularities
+[ref-custom-granularities]: /product/data-modeling/reference/dimensions#granularities
+[wiki-iso-8601]: https://en.wikipedia.org/wiki/ISO_8601
+[ref-join-hints]: /product/data-modeling/concepts/working-with-joins#join-hints

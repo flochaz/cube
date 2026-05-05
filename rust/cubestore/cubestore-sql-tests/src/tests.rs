@@ -110,6 +110,10 @@ pub fn sql_tests() -> Vec<(&'static str, TestFn)> {
             "create_table_with_csv_no_header_and_delimiter",
             create_table_with_csv_no_header_and_delimiter,
         ),
+        t(
+            "create_table_with_csv_no_header_and_quotes",
+            create_table_with_csv_no_header_and_quotes,
+        ),
         t("create_table_with_url", create_table_with_url),
         t("create_table_fail_and_retry", create_table_fail_and_retry),
         t("empty_crash", empty_crash),
@@ -134,6 +138,7 @@ pub fn sql_tests() -> Vec<(&'static str, TestFn)> {
         t("hyperloglog_postgres", hyperloglog_postgres),
         t("hyperloglog_snowflake", hyperloglog_snowflake),
         t("hyperloglog_databricks", hyperloglog_databricks),
+        t("xirr", xirr),
         t(
             "aggregate_index_hll_databricks",
             aggregate_index_hll_databricks,
@@ -2229,8 +2234,12 @@ async fn create_table_with_csv_no_header(service: Box<dyn SqlClient>) {
 
 async fn create_table_with_csv_no_header_and_delimiter(service: Box<dyn SqlClient>) {
     let file = write_tmp_file(indoc! {"
+        \"apple\u{0001}31
+        a\"pple\u{0001}32
+        a\"pp\"le\u{0001}12
         apple\u{0001}2
         banana\u{0001}3
+        \"orange\" orange\u{0001}4
     "})
     .unwrap();
     let path = file.path().to_string_lossy();
@@ -2239,7 +2248,7 @@ async fn create_table_with_csv_no_header_and_delimiter(service: Box<dyn SqlClien
         .await
         .unwrap();
     let _ = service
-        .exec_query(format!("CREATE TABLE test.table (`fruit` text, `number` int) WITH (input_format = 'csv_no_header', delimiter = '^A') LOCATION '{}'", path).as_str())
+        .exec_query(format!("CREATE TABLE test.table (`fruit` text, `number` int) WITH (input_format = 'csv_no_header', delimiter = '^A', disable_quoting = true) LOCATION '{}'", path).as_str())
         .await
         .unwrap();
     let result = service
@@ -2249,13 +2258,78 @@ async fn create_table_with_csv_no_header_and_delimiter(service: Box<dyn SqlClien
     assert_eq!(
         to_rows(&result),
         vec![
+            vec![
+                TableValue::String("\"apple".to_string()),
+                TableValue::Int(31)
+            ],
+            vec![
+                TableValue::String("\"orange\" orange".to_string()),
+                TableValue::Int(4)
+            ],
+            vec![
+                TableValue::String("a\"pp\"le".to_string()),
+                TableValue::Int(12)
+            ],
+            vec![
+                TableValue::String("a\"pple".to_string()),
+                TableValue::Int(32)
+            ],
             vec![TableValue::String("apple".to_string()), TableValue::Int(2)],
-            vec![TableValue::String("banana".to_string()), TableValue::Int(3)]
+            vec![TableValue::String("banana".to_string()), TableValue::Int(3)],
+        ]
+    );
+}
+
+async fn create_table_with_csv_no_header_and_quotes(service: Box<dyn SqlClient>) {
+    let file = write_tmp_file(indoc! {"
+        \"\"\"apple\",31
+        \"a\"\"pple\",32
+        \"a\"\"pp\"\"le\",12
+        apple,2
+        banana,3
+        \"\"\"orange\"\" orange\",4
+    "})
+    .unwrap();
+    let path = file.path().to_string_lossy();
+    let _ = service
+        .exec_query("CREATE SCHEMA IF NOT EXISTS test")
+        .await
+        .unwrap();
+    let _ = service
+        .exec_query(format!("CREATE TABLE test.table (`fruit` text, `number` int) WITH (input_format = 'csv_no_header', delimiter = ',', disable_quoting = false) LOCATION '{}'", path).as_str())
+        .await
+        .unwrap();
+    let result = service
+        .exec_query("SELECT * FROM test.table")
+        .await
+        .unwrap();
+    assert_eq!(
+        to_rows(&result),
+        vec![
+            vec![
+                TableValue::String("\"apple".to_string()),
+                TableValue::Int(31)
+            ],
+            vec![
+                TableValue::String("\"orange\" orange".to_string()),
+                TableValue::Int(4)
+            ],
+            vec![
+                TableValue::String("a\"pp\"le".to_string()),
+                TableValue::Int(12)
+            ],
+            vec![
+                TableValue::String("a\"pple".to_string()),
+                TableValue::Int(32)
+            ],
+            vec![TableValue::String("apple".to_string()), TableValue::Int(2)],
+            vec![TableValue::String("banana".to_string()), TableValue::Int(3)],
         ]
     );
 }
 
 async fn create_table_with_url(service: Box<dyn SqlClient>) {
+    // TODO serve this data ourselves
     let url = "https://data.wprdc.org/dataset/0b584c84-7e35-4f4d-a5a2-b01697470c0f/resource/e95dd941-8e47-4460-9bd8-1e51c194370b/download/bikepghpublic.csv";
 
     service
@@ -2799,6 +2873,122 @@ async fn hyperloglog_databricks(service: Box<dyn SqlClient>) {
         .await
         .unwrap();
     assert_eq!(to_rows(&r), rows(&[(1, 4), (2, 4), (3, 20)]));
+}
+
+async fn xirr(service: Box<dyn SqlClient>) {
+    // XIRR result may differ between platforms, so we truncate the results with LEFT(_, 10).
+    let r = service
+        .exec_query(
+            r#"
+        SELECT LEFT(XIRR(payment, date)::varchar, 10) AS xirr
+        FROM (
+            SELECT '2014-01-01'::date AS date, -10000.0 AS payment
+            UNION ALL
+            SELECT '2014-03-01'::date AS date, 2750.0 AS payment
+            UNION ALL
+            SELECT '2014-10-30'::date AS date, 4250.0 AS payment
+            UNION ALL
+            SELECT '2015-02-15'::date AS date, 3250.0 AS payment
+            UNION ALL
+            SELECT '2015-04-01'::date AS date, 2750.0 AS payment
+        ) AS "t"
+        "#,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(to_rows(&r), rows(&["0.37485859"]));
+
+    let r = service
+        .exec_query(
+            r#"
+        SELECT LEFT(XIRR(payment, date)::varchar, 10) AS xirr
+        FROM (
+            SELECT '2014-01-01'::date AS date, -10000.0 AS payment
+        ) AS "t"
+        WHERE 0 = 1
+        "#,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(r.elide_backtrace(), CubeError::internal("Arrow error: External error: Execution error: A result for XIRR couldn't be determined because the arguments are empty".to_owned()));
+
+    let r = service
+        .exec_query(
+            r#"
+        SELECT LEFT(XIRR(payment, date)::varchar, 10) AS xirr
+        FROM (
+            SELECT '2014-01-01'::date AS date, 10000.0 AS payment
+        ) AS "t"
+        "#,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(r.elide_backtrace(), CubeError::internal("Arrow error: External error: Execution error: The XIRR function couldn't find a solution".to_owned()));
+
+    // --- on_error testing ---
+
+    let r = service
+        .exec_query(
+            r#"
+        SELECT LEFT(XIRR(payment, date, 0, NULL::double)::varchar, 10) AS xirr
+        FROM (
+            SELECT '2014-01-01'::date AS date, -10000.0 AS payment
+            UNION ALL
+            SELECT '2014-03-01'::date AS date, 2750.0 AS payment
+            UNION ALL
+            SELECT '2014-10-30'::date AS date, 4250.0 AS payment
+            UNION ALL
+            SELECT '2015-02-15'::date AS date, 3250.0 AS payment
+            UNION ALL
+            SELECT '2015-04-01'::date AS date, 2750.0 AS payment
+        ) AS "t"
+        "#,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(to_rows(&r), rows(&["0.37485859"]));
+
+    let r = service
+        .exec_query(
+            r#"
+        SELECT LEFT(XIRR(payment, date, 0, NULL::double)::varchar, 10) AS xirr
+        FROM (
+            SELECT '2014-01-01'::date AS date, -10000.0 AS payment
+        ) AS "t"
+        WHERE 0 = 1
+        "#,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(r.elide_backtrace(), CubeError::internal("Arrow error: External error: Execution error: A result for XIRR couldn't be determined because the arguments are empty".to_owned()));
+
+    let r = service
+        .exec_query(
+            r#"
+        SELECT LEFT(XIRR(payment, date, 0, NULL::double)::varchar, 10) AS xirr
+        FROM (
+            SELECT '2014-01-01'::date AS date, 10000.0 AS payment
+        ) AS "t"
+        "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(to_rows(&r), rows(&[()]));
+
+    let r = service
+        .exec_query(
+            r#"
+        SELECT LEFT(XIRR(payment, date, 0, 12345)::varchar, 10) AS xirr
+        FROM (
+            SELECT '2014-01-01'::date AS date, 10000.0 AS payment
+        ) AS "t"
+        "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(to_rows(&r), rows(&["12345.0"]));
 }
 
 async fn aggregate_index_hll_databricks(service: Box<dyn SqlClient>) {

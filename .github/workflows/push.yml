@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - '.github/actions/smoke.sh'
+      - '.github/actions/integration/**'
       - '.github/workflows/push.yml'
       - '.github/workflows/master.yml'
       - 'packages/**'
@@ -18,11 +19,14 @@ on:
       - 'package.json'
       - 'lerna.json'
       - 'rollup.config.js'
+      - 'jest.base.config.js'
       - 'yarn.lock'
     branches:
       - 'master'
   pull_request:
     paths:
+      - '.github/actions/smoke.sh'
+      - '.github/actions/integration/**'
       - '.github/workflows/push.yml'
       - '.github/workflows/master.yml'
       - 'packages/**'
@@ -37,6 +41,7 @@ on:
       - 'package.json'
       - 'lerna.json'
       - 'rollup.config.js'
+      - 'jest.base.config.js'
       - 'yarn.lock'
 
 env:
@@ -45,6 +50,29 @@ env:
   PYTHON_VERSION_CURRENT: 3.11
 
 jobs:
+  latest-tag-sha:
+    runs-on: ubuntu-24.04
+    outputs:
+      sha: ${{ steps.get-tag.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: git-log
+        run: git log HEAD~30..HEAD
+      - id: get-tag-test
+        run: echo "$SHA $(git rev-list -n 1 "$(git tag --contains "$SHA")")"
+        env:
+          SHA: ${{ github.sha }}
+      - id: get-tag
+        run: echo "sha=$(git rev-list -n 1 "$(git tag --contains "$SHA")")" >> "$GITHUB_OUTPUT"
+        env:
+          SHA: ${{ github.sha }}
+      - id: get-tag-out
+        run: echo "$OUT"
+        env:
+          OUT: ${{ steps.get-tag.outputs.sha }}
+
   unit:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -54,14 +82,12 @@ jobs:
     strategy:
       matrix:
         # Current docker version + next LTS
-        node-version: [20.x, 22.x]
+        # TODO: Add 24 after it's been released
+        node-version: [22.x]
         # Don't forget to update build-native-release
         python-version: [3.11]
-        transpile-worker-threads: [false, true]
       fail-fast: false
 
-    env:
-      CUBEJS_TRANSPILATION_WORKER_THREADS: ${{ matrix.transpile-worker-threads }}
     steps:
       - id: get-tag-out
         run: echo "$OUT"
@@ -114,12 +140,21 @@ jobs:
         run: yarn build
       - name: Lerna test
         run: yarn lerna run --concurrency 1 --stream --no-prefix unit
-#      - uses: codecov/codecov-action@v1
-#        if: (matrix.node-version == '20.x')
-#        with:
-#          files: ./packages/*/coverage/clover.xml
-#          flags: cube-backend
-#          verbose: true # optional (default = false)
+      - name: Fix lcov paths
+        if: (matrix.node-version == '22.x')
+        run: |
+          ./.github/actions/codecov-fix.sh
+      - name: Combine all fixed LCOV files
+        if: (matrix.node-version == '22.x')
+        run: |
+          echo "" > ./combined-unit.lcov
+          find ./packages -type f -name lcov.fixed.info -exec cat {} + >> ./combined-unit.lcov || true
+      - name: Upload coverage artifact
+        if: (matrix.node-version == '22.x')
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-unit
+          path: ./combined-unit.lcov
 
   lint:
     runs-on: ubuntu-24.04
@@ -133,14 +168,14 @@ jobs:
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: 1.84.1
+          toolchain: 1.90.0
           # override: true # this is by default on
           rustflags: ""
           components: rustfmt
-      - name: Install Node.js 20.x
+      - name: Install Node.js 22.x
         uses: actions/setup-node@v4
         with:
-          node-version: 20.x
+          node-version: 22.x
       - name: Get yarn cache directory path
         id: yarn-cache-dir-path
         run: echo "dir=$(yarn cache dir)" >> "$GITHUB_OUTPUT"
@@ -198,7 +233,7 @@ jobs:
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: 1.84.1
+          toolchain: 1.90.0
           components: rustfmt
       - name: Cargo test cubeorchestrator
         run: cargo test --manifest-path rust/cubeorchestrator/Cargo.toml -j 4
@@ -222,7 +257,7 @@ jobs:
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: nightly-2024-01-29
+          toolchain: nightly-2025-08-01
           # override: true # this is by default on
           rustflags: ""
           components: rustfmt
@@ -261,7 +296,7 @@ jobs:
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: 1.84.1
+          toolchain: 1.90.0
           # override: true # this is by default on
           rustflags: ""
           components: rustfmt
@@ -272,10 +307,10 @@ jobs:
           workspaces: ./packages/cubejs-backend-native
           key: native-${{ runner.OS }}-x86_64-unknown-linux-gnu
           shared-key: native-${{ runner.OS }}-x86_64-unknown-linux-gnu
-      - name: Install Node.js 20
+      - name: Install Node.js 22
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
       - name: Install Yarn
         run: npm install -g yarn
       - name: Set Yarn version
@@ -304,28 +339,14 @@ jobs:
 
     strategy:
       matrix:
-        node-version: [20.x]
+        node-version: [22.x]
       fail-fast: false
 
     steps:
-      - name: Maximize build space (disk space limitations)
-        run: |
-          echo "Before"
-          df -h
-          sudo apt-get remove -y 'php.*'
-          sudo apt-get remove -y '^mongodb-.*'
-          sudo apt-get remove -y '^mysql-.*'
-          sudo apt-get autoremove -y
-          sudo apt-get clean
-
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          echo "After"
-          df -h
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Maximize build space
+        uses: ./.github/actions/maximize-build-space
       - name: Install Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v4
         with:
@@ -385,6 +406,9 @@ jobs:
     if: (needs['latest-tag-sha'].outputs.sha != github.sha)
     env:
       CLOUD_DATABASES: >
+        athena
+        bigquery
+        snowflake
         firebolt
         dremio
       # Athena (just to check for secrets availability)
@@ -392,11 +416,21 @@ jobs:
 
     strategy:
       matrix:
-        node-version: [20.x]
+        node-version: [22.x]
+        # Vertica tests are disabled because around 20.08.2025 someone
+        # totally removed all vertica-ce docker repository from dockerhub.
+        # @see https://github.com/vertica/vertica-containers/issues/64
         db: [
+            'athena', 'bigquery', 'snowflake', 'trino',
             'clickhouse', 'druid', 'elasticsearch', 'mssql', 'mysql', 'postgres', 'prestodb',
-            'mysql-aurora-serverless', 'crate', 'mongobi', 'firebolt', 'dremio', 'vertica'
+            'mysql-aurora-serverless', 'crate', 'mongobi', 'firebolt', 'dremio'
+#            'vertica'
         ]
+        use_tesseract_sql_planner: [ false ]
+        include:
+          - db: postgres
+            node-version: 22.x
+            use_tesseract_sql_planner: true
       fail-fast: false
 
     steps:
@@ -410,7 +444,7 @@ jobs:
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: 1.84.1
+          toolchain: 1.90.0
           # override: true # this is by default on
           rustflags: ""
           components: rustfmt
@@ -445,6 +479,8 @@ jobs:
           retry_wait_seconds: 15
           timeout_minutes: 20
           command: yarn install --frozen-lockfile
+      - name: Build Core Client libraries
+        run: yarn build
       - name: Lerna tsc
         run: yarn tsc
       - name: Run Integration tests for ${{ matrix.db }} matrix
@@ -460,6 +496,8 @@ jobs:
           (contains(env.CLOUD_DATABASES, matrix.db) && env.DRIVERS_TESTS_ATHENA_CUBEJS_AWS_KEY != '') ||
           (!contains(env.CLOUD_DATABASES, matrix.db))
         env:
+          CUBEJS_TESSERACT_SQL_PLANNER: ${{ matrix.use_tesseract_sql_planner }}
+
           # Firebolt Integration
           DRIVERS_TESTS_FIREBOLT_CUBEJS_FIREBOLT_ENGINE_NAME: ${{ secrets.DRIVERS_TESTS_FIREBOLT_CUBEJS_FIREBOLT_ENGINE_NAME }}
           DRIVERS_TESTS_FIREBOLT_CUBEJS_DB_NAME: ${{ secrets.DRIVERS_TESTS_FIREBOLT_CUBEJS_DB_NAME }}
@@ -471,6 +509,29 @@ jobs:
           DRIVERS_TESTS_DREMIO_CUBEJS_DB_NAME: ${{ secrets.DRIVERS_TESTS_DREMIO_CUBEJS_DB_NAME }}
           DRIVERS_TESTS_DREMIO_CUBEJS_DB_DREMIO_AUTH_TOKEN: ${{ secrets.DRIVERS_TESTS_DREMIO_CUBEJS_DB_DREMIO_AUTH_TOKEN }}
 
+          # BigQuery
+          DRIVERS_TESTS_SNOWFLAKE_CUBEJS_DB_BQ_CREDENTIALS: ${{ secrets.CUBEJS_DB_BQ_CREDENTIALS }}
+
+          # AWS Athena
+          DRIVERS_TESTS_SNOWFLAKE_CUBEJS_AWS_KEY: ${{ secrets.CUBEJS_AWS_KEY }}
+          DRIVERS_TESTS_SNOWFLAKE_CUBEJS_AWS_SECRET: ${{ secrets.CUBEJS_AWS_SECRET }}
+
+          # Snowflake
+          DRIVERS_TESTS_SNOWFLAKE_CUBEJS_DB_USER: ${{ secrets.DRIVERS_TESTS_CUBEJS_DB_SNOWFLAKE_USER }}
+          DRIVERS_TESTS_SNOWFLAKE_CUBEJS_DB_PASS: ${{ secrets.DRIVERS_TESTS_CUBEJS_DB_SNOWFLAKE_PASS }}
+      - name: Fix lcov paths
+        run: |
+          ./.github/actions/codecov-fix.sh
+      - name: Combine all fixed LCOV files
+        run: |
+          echo "" > ./combined-integration-${{ matrix.db }}-${{ matrix.use_tesseract_sql_planner }}.lcov
+          find ./packages -type f -name lcov.fixed.info -exec cat {} + >> ./combined-integration-${{ matrix.db }}-${{ matrix.use_tesseract_sql_planner }}.lcov || true
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-integration-${{ matrix.db }}-${{ matrix.use_tesseract_sql_planner }}
+          path: ./combined-integration-${{ matrix.db }}-${{ matrix.use_tesseract_sql_planner }}.lcov
+
   integration-smoke:
     needs: [latest-tag-sha, build-cubestore, build-native-linux]
     runs-on: ubuntu-24.04
@@ -479,29 +540,15 @@ jobs:
 
     strategy:
       matrix:
-        node-version: [ 20.x ]
+        node-version: [ 22.x ]
         python-version: [ 3.11 ]
       fail-fast: false
 
     steps:
-      - name: Maximize build space (disk space limitations)
-        run: |
-          echo "Before"
-          df -h
-          sudo apt-get remove -y 'php.*'
-          sudo apt-get remove -y '^mongodb-.*'
-          sudo apt-get remove -y '^mysql-.*'
-          sudo apt-get autoremove -y
-          sudo apt-get clean
-
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          echo "After"
-          df -h
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Maximize build space
+        uses: ./.github/actions/maximize-build-space
       - name: Download backend-native artifact
         uses: actions/download-artifact@v4
         with:
@@ -571,29 +618,6 @@ jobs:
         env:
           GITHUB_SHA: ${{ github.sha }}
 
-  latest-tag-sha:
-    runs-on: ubuntu-24.04
-    outputs:
-      sha: ${{ steps.get-tag.outputs.sha }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - id: git-log
-        run: git log HEAD~30..HEAD
-      - id: get-tag-test
-        run: echo "$SHA $(git rev-list -n 1 "$(git tag --contains "$SHA")")"
-        env:
-          SHA: ${{ github.sha }}
-      - id: get-tag
-        run: echo "sha=$(git rev-list -n 1 "$(git tag --contains "$SHA")")" >> "$GITHUB_OUTPUT"
-        env:
-          SHA: ${{ github.sha }}
-      - id: get-tag-out
-        run: echo "$OUT"
-        env:
-          OUT: ${{ steps.get-tag.outputs.sha }}
-
   docker-dev:
     needs: [latest-tag-sha, build-native-linux]
     if: (needs['latest-tag-sha'].outputs.sha != github.sha)
@@ -607,7 +631,7 @@ jobs:
           - 5000:5000
     strategy:
       matrix:
-        node-version: [ 20 ]
+        node-version: [ 22 ]
         target: [ "x86_64-unknown-linux-gnu" ]
         dockerfile:
           - dev.Dockerfile
@@ -617,24 +641,10 @@ jobs:
             tag: tmp-dev
       fail-fast: false
     steps:
-      - name: Maximize build space (disk space limitations)
-        run: |
-          echo "Before"
-          df -h
-          sudo apt-get remove -y 'php.*'
-          sudo apt-get remove -y '^mongodb-.*'
-          sudo apt-get remove -y '^mysql-.*'
-          sudo apt-get autoremove -y
-          sudo apt-get clean
-
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          echo "After"
-          df -h
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Maximize build space
+        uses: ./.github/actions/maximize-build-space
       - name: Download backend-native artifact
         uses: actions/download-artifact@v4
         with:
@@ -752,3 +762,33 @@ jobs:
         with:
           name: cypress-screenshots-docker-dev-${{ matrix.name }}
           path: packages/cubejs-testing/cypress/screenshots
+
+  upload-coverage:
+    name: Upload merged coverage to Codecov
+    needs: [unit, integration]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Install Codecov CLI
+        run: |
+          curl -Os https://uploader.codecov.io/latest/linux/codecov
+          chmod +x codecov
+      - name: Download all coverage artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-coverage
+      - name: Merge all coverage files
+        run: |
+          find all-coverage -name '*.lcov' -exec cat {} + > merged-coverage.info
+      - name: Upload merged coverage to Codecov
+        run: |
+          ./codecov --token "${{ secrets.CODECOV_TOKEN }}" \
+              --file ./merged-coverage.info \
+              --flags cube-backend \
+              --name "cube backend coverage"

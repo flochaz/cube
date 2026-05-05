@@ -144,11 +144,12 @@ export class DatabricksQuery extends BaseQuery {
     return `\`${name}\``;
   }
 
-  public getFieldIndex(id: string) {
-    const dimension = this.dimensionsForSelect().find((d: any) => d.dimension === id);
-    if (dimension) {
-      return super.getFieldIndex(id);
+  public override getFieldIndex(id: string): string | number | null {
+    const idx = super.getFieldIndex(id);
+    if (idx !== null) {
+      return idx;
     }
+
     return this.escapeColumnName(this.aliasName(id, false));
   }
 
@@ -156,32 +157,12 @@ export class DatabricksQuery extends BaseQuery {
     return 'unix_timestamp()';
   }
 
-  public orderHashToString(hash: any) {
-    if (!hash || !hash.id) {
-      return null;
-    }
-
-    const fieldIndex = this.getFieldIndex(hash.id);
-    if (fieldIndex === null) {
-      return null;
-    }
-
-    const dimensionsForSelect = this.dimensionsForSelect();
-    const dimensionColumns = R.flatten(
-      dimensionsForSelect.map((s: any) => s.selectColumns() && s.aliasName())
-    )
-      .filter(s => !!s);
-
-    if (dimensionColumns.length) {
-      const direction = hash.desc ? 'DESC' : 'ASC';
-      return `${fieldIndex} ${direction}`;
-    }
-
-    return null;
-  }
-
   public defaultRefreshKeyRenewalThreshold() {
     return 120;
+  }
+
+  public supportGeneratedSeriesForCustomTd() {
+    return true;
   }
 
   public sqlTemplates() {
@@ -201,6 +182,32 @@ export class DatabricksQuery extends BaseQuery {
     templates.expressions.interval_single_date_part = 'INTERVAL \'{{ num }}\' {{ date_part }}';
     templates.quotes.identifiers = '`';
     templates.quotes.escape = '``';
+    templates.statements.time_series_select = 'SELECT date_from::timestamp AS `date_from`,\n' +
+      'date_to::timestamp AS `date_to` \n' +
+      'FROM(\n' +
+      '    VALUES ' +
+      '{% for time_item in seria  %}' +
+      '(\'{{ time_item | join(\'\\\', \\\'\') }}\')' +
+      '{% if not loop.last %}, {% endif %}' +
+      '{% endfor %}' +
+      ') AS dates (date_from, date_to)';
+    templates.statements.generated_time_series_select = 'SELECT d AS date_from,\n' +
+      '(d + INTERVAL {{ granularity }}) - INTERVAL 1 MILLISECOND AS date_to\n' +
+      '  FROM (SELECT explode(sequence(\n' +
+      '    from_utc_timestamp({{ start }}, \'UTC\'), from_utc_timestamp({{ end }}, \'UTC\'), INTERVAL {{ granularity }}\n' +
+      '  )) AS d)';
+    templates.statements.generated_time_series_with_cte_range_source =
+    'SELECT d AS date_from,\n' +
+    '(d + INTERVAL {{ granularity }}) - INTERVAL 1 MILLISECOND AS date_to\n' +
+    'FROM {{ range_source }}\n' +
+    'LATERAL VIEW explode(\n' +
+    '    sequence(\n' +
+    '        CAST({{ min_name }} AS TIMESTAMP),\n' +
+    '        CAST({{ max_name }} AS TIMESTAMP),\n' +
+    '        INTERVAL {{ granularity }}\n' +
+    '    )\n' +
+    ') dates AS d';
+
     // TODO: Databricks has `TIMESTAMP_NTZ` with logic similar to Pg's `TIMESTAMP`
     // but that requires Runtime 13.3+. Should this be enabled?
     // templates.types.timestamp = 'TIMESTAMP_NTZ';

@@ -14,6 +14,18 @@ use syn::{
 pub fn native_bridge(args: TokenStream, input: TokenStream) -> proc_macro::TokenStream {
     let mut svc = parse_macro_input!(input as NativeService);
     let args = parse_macro_input!(args with Punctuated::<Meta, syn::Token![,]>::parse_terminated);
+    for arg in args.iter() {
+        match arg {
+            Meta::Path(p) => {
+                if p.is_ident("without_imports") {
+                    svc.without_imports = true;
+                } else {
+                    svc.static_data_type = Some(p.clone())
+                }
+            }
+            _ => {}
+        }
+    }
     if args.len() > 0 {
         let arg = args.first().unwrap();
         match arg {
@@ -29,6 +41,7 @@ struct NativeService {
     ident: Ident,
     methods: Vec<NativeMethod>,
     pub static_data_type: Option<Path>,
+    pub without_imports: bool,
 }
 
 enum NativeMethodType {
@@ -119,6 +132,7 @@ impl Parse for NativeService {
                     ident: trait_item.ident.clone(),
                     methods,
                     static_data_type: None,
+                    without_imports: false,
                 }
             }
             x => {
@@ -373,10 +387,14 @@ impl NativeService {
     }
 
     fn imports(&self) -> proc_macro2::TokenStream {
-        quote! {
-            use cubenativeutils::wrappers::inner_types::InnerTypes;
-            use cubenativeutils::wrappers::object::NativeStruct;
+        let mut imports = quote! {};
+        if !self.without_imports {
+            imports.extend(quote! {
+                use cubenativeutils::wrappers::inner_types::InnerTypes;
+                use cubenativeutils::wrappers::object::NativeStruct;
+            });
         }
+        imports
     }
 
     fn original_trait(&self) -> proc_macro2::TokenStream {
@@ -443,11 +461,27 @@ impl NativeService {
 
     fn struct_impl(&self) -> proc_macro2::TokenStream {
         let struct_ident = self.struct_ident();
+        let struct_name = struct_ident.to_string();
+        let has_required_fields = self.methods.iter().any(|m| !m.is_optional());
+        let required_field_check = if has_required_fields {
+            let checks = self
+                .methods
+                .iter()
+                .map(|m| m.required_field_check(&struct_name))
+                .collect_vec();
+            quote! {
+                let native_struct = native_object.to_struct()?;
+                #( #checks )*
+            }
+        } else {
+            quote! {}
+        };
         if let Some(static_data_type) = &self.static_data_type {
             quote! {
                 impl<IT: InnerTypes> #struct_ident<IT> {
                     pub fn try_new(native_object: NativeObjectHandle<IT>) -> Result<Self, CubeError> {
                         let static_data = #static_data_type::from_native(native_object.clone())?;
+                        #required_field_check
                         Ok(Self {native_object, static_data} )
                     }
                 }
@@ -456,6 +490,7 @@ impl NativeService {
             quote! {
                 impl<IT: InnerTypes> #struct_ident<IT> {
                     pub fn try_new(native_object: NativeObjectHandle<IT>) -> Result<Self, CubeError> {
+                        #required_field_check
                         Ok(Self {native_object} )
                     }
                 }
@@ -526,6 +561,27 @@ impl NativeMethod {
                 fn #ident(#( #args ),*) #output;
             }
         }
+    }
+
+    fn required_field_check(&self, struct_name: &str) -> proc_macro2::TokenStream {
+        let &Self { method_params, .. } = &self;
+        let js_method_name = method_params
+            .custom_name
+            .clone()
+            .unwrap_or_else(|| self.camel_case_name());
+        if method_params.is_optional {
+            quote! {}
+        } else {
+            quote! {
+               if !native_struct.has_field(#js_method_name)? {
+                   return Err(CubeError::internal(format!("Field {} is required for {}", #js_method_name, #struct_name)));
+               }
+            }
+        }
+    }
+
+    fn is_optional(&self) -> bool {
+        self.method_params.is_optional
     }
 
     fn method_impl(&self) -> proc_macro2::TokenStream {

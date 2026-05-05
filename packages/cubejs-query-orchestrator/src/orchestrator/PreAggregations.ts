@@ -4,7 +4,7 @@ import { getEnv, } from '@cubejs-backend/shared';
 
 import { BaseDriver, InlineTable, } from '@cubejs-backend/base-driver';
 import { CubeStoreDriver } from '@cubejs-backend/cubestore-driver';
-import LRUCache from 'lru-cache';
+import { LRUCache } from 'lru-cache';
 
 import { PreAggTableToTempTable, Query, QueryBody, QueryCache, QueryWithParams } from './QueryCache';
 import { DriverFactory, DriverFactoryByDataSource } from './DriverFactory';
@@ -242,11 +242,11 @@ type PreAggregationQueryBody = QueryBody & {
 };
 
 export class PreAggregations {
-  public options: PreAggregationsOptions;
+  public readonly options: PreAggregationsOptions;
 
-  public externalDriverFactory: DriverFactory;
+  public readonly externalDriverFactory: DriverFactory;
 
-  public structureVersionPersistTime: any;
+  public readonly structureVersionPersistTime: any;
 
   private readonly touchTablePersistTime: number;
 
@@ -260,7 +260,7 @@ export class PreAggregations {
 
   private readonly queue: Record<string, QueryQueue> = {};
 
-  private readonly getQueueEventsBus: any;
+  private readonly usedCache: LRUCache<string, true>;
 
   private readonly touchCache: LRUCache<string, true>;
 
@@ -279,11 +279,29 @@ export class PreAggregations {
     this.dropPreAggregationsWithoutTouch = options.dropPreAggregationsWithoutTouch || getEnv('dropPreAggregationsWithoutTouch');
     this.usedTablePersistTime = options.usedTablePersistTime || getEnv('dbQueryTimeout');
     this.externalRefresh = options.externalRefresh;
-    this.getQueueEventsBus = options.getQueueEventsBus;
+
+    /**
+     * Comment for both caches: used and touch:
+     *
+     * Memory usage: By default, it defines max as 8096 keys,
+     * let's assume that avg key size is 64 symbols, it's around 100 bytes
+     * with V8's internal stuff:
+     *
+     * 100 x 8096 = 809 bytes, max 1Mb in memory.
+     *
+     * However, this is a theoretical limit. In practice, even a couple of thousand
+     * is a very large number
+     */
+    this.usedCache = new LRUCache({
+      max: getEnv('usedPreAggregationCacheMaxCount'),
+      ttl: Math.round(this.usedTablePersistTime / 2) * 1000,
+      allowStale: false,
+      updateAgeOnGet: false
+    });
     this.touchCache = new LRUCache({
       max: getEnv('touchPreAggregationCacheMaxCount'),
-      maxAge: getEnv('touchPreAggregationCacheMaxAge') * 1000,
-      stale: false,
+      ttl: getEnv('touchPreAggregationCacheMaxAge') * 1000,
+      allowStale: false,
       updateAgeOnGet: false
     });
   }
@@ -304,11 +322,23 @@ export class PreAggregations {
   }
 
   public async addTableUsed(tableName: string): Promise<void> {
-    await this.queryCache.getCacheDriver().set(
-      this.tablesUsedRedisKey(tableName),
-      true,
-      this.usedTablePersistTime
-    );
+    if (this.usedCache.has(tableName)) {
+      return;
+    }
+
+    try {
+      this.usedCache.set(tableName, true);
+
+      await this.queryCache.getCacheDriver().set(
+        this.tablesUsedRedisKey(tableName),
+        true,
+        this.usedTablePersistTime
+      );
+    } catch (e: unknown) {
+      this.usedCache.delete(tableName);
+
+      throw e;
+    }
   }
 
   public async tablesUsed() {
@@ -330,7 +360,7 @@ export class PreAggregations {
         this.touchTablePersistTime
       );
     } catch (e: unknown) {
-      this.touchCache.del(tableName);
+      this.touchCache.delete(tableName);
 
       throw e;
     }
@@ -350,7 +380,7 @@ export class PreAggregations {
   }
 
   /**
-   * Determines whether the partition table is already exists or not.
+   * Determines whether the partition table already exists or not.
    */
   public async isPartitionExist(
     request: string,
@@ -379,10 +409,9 @@ export class PreAggregations {
     tables = tables.filter(row => `${schema}.${row.table_name}` === table);
 
     // fetching query result
-    const { queueDriver } = this.queue[dataSource];
-    const conn = await queueDriver.createConnection();
+    const conn = await this.queue[dataSource].getQueueDriver().createConnection();
     const result = await conn.getResult(key);
-    queueDriver.release(conn);
+    this.queue[dataSource].getQueueDriver().release(conn);
 
     // calculating status
     let status: string;
@@ -469,7 +498,7 @@ export class PreAggregations {
             maxPartitions: this.options.maxPartitions,
             maxSourceRowLimit: this.options.maxSourceRowLimit,
             isJob: queryBody.isJob,
-            waitForRenew: queryBody.renewQuery,
+            waitForRenew: queryBody.cacheMode !== undefined ? queryBody.cacheMode === 'must-revalidate' : queryBody.renewQuery,
             // TODO workaround to avoid continuous waiting on building pre-aggregation dependencies
             forceBuild: i === preAggregations.length - 1 ? queryBody.forceBuildPreAggregations : false,
             requestId: queryBody.requestId,
@@ -512,7 +541,7 @@ export class PreAggregations {
    */
   public async checkPartitionsBuildRangeCache(queryBody) {
     const preAggregations = queryBody.preAggregations || [];
-    const result = await Promise.all(
+    return Promise.all(
       preAggregations.map(async (preAggregation) => {
         const { preAggregationStartEndQueries } = preAggregation;
         const invalidate =
@@ -538,7 +567,6 @@ export class PreAggregations {
         };
       })
     );
-    return result;
   }
 
   public async expandPartitionsInPreAggregations(queryBody: Query): Promise<Query> {
@@ -575,7 +603,7 @@ export class PreAggregations {
         {
           maxPartitions: this.options.maxPartitions,
           maxSourceRowLimit: this.options.maxSourceRowLimit,
-          waitForRenew: queryBody.renewQuery,
+          waitForRenew: queryBody.cacheMode !== undefined ? queryBody.cacheMode === 'must-revalidate' : queryBody.renewQuery,
           requestId: queryBody.requestId,
           externalRefresh: this.externalRefresh,
           compilerCacheFn: queryBody.compilerCacheFn,
@@ -591,7 +619,7 @@ export class PreAggregations {
 
     return {
       ...queryBody,
-      preAggregations: expandedPreAggregations.reduce((a, b) => a.concat(b), []),
+      preAggregations: expandedPreAggregations.flat(),
       groupedPartitionPreAggregations: expandedPreAggregations
     };
   }
@@ -635,7 +663,6 @@ export class PreAggregations {
             // Centralized continueWaitTimeout that can be overridden in queueOptions
             continueWaitTimeout: this.options.continueWaitTimeout,
             ...queueOptions,
-            getQueueEventsBus: this.getQueueEventsBus,
           }
         );
       }
@@ -673,7 +700,6 @@ export class PreAggregations {
           return loadCache.fetchTables(preAggregation);
         },
         {
-          getQueueEventsBus: this.getQueueEventsBus,
           concurrency: 4,
           logger: this.logger,
           cacheAndQueueDriver: this.options.cacheAndQueueDriver,
@@ -719,7 +745,7 @@ export class PreAggregations {
   public async getVersionEntries(preAggregations: PreAggregationDescription[], requestId): Promise<VersionEntry[][]> {
     const loadCacheByDataSource = {};
 
-    const getLoadCacheByDataSource = (dataSource = 'default', preAggregationSchema) => {
+    const getLoadCacheByDataSource = (preAggregationSchema, dataSource = 'default') => {
       if (!loadCacheByDataSource[`${dataSource}_${preAggregationSchema}`]) {
         loadCacheByDataSource[`${dataSource}_${preAggregationSchema}`] =
           new PreAggregationLoadCache(
@@ -741,9 +767,9 @@ export class PreAggregations {
       preAggregations.map(
         async preAggregation => {
           const { dataSource, preAggregationsSchema } = preAggregation;
-          const cacheKey = getLoadCacheByDataSource(dataSource, preAggregationsSchema).tablesCachePrefixKey(preAggregation);
+          const cacheKey = getLoadCacheByDataSource(preAggregationsSchema, dataSource).tablesCachePrefixKey(preAggregation);
           if (!firstByCacheKey[cacheKey]) {
-            firstByCacheKey[cacheKey] = getLoadCacheByDataSource(dataSource, preAggregationsSchema).getVersionEntries(preAggregation);
+            firstByCacheKey[cacheKey] = getLoadCacheByDataSource(preAggregationsSchema, dataSource).getVersionEntries(preAggregation);
             const res = await firstByCacheKey[cacheKey];
             return res.versionEntries;
           }

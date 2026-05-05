@@ -1,4 +1,6 @@
-use std::{collections::HashMap, fmt::Debug, hash::Hash, marker::PhantomData, sync::Arc};
+use std::{
+    collections::HashMap, fmt::Debug, hash::Hash, marker::PhantomData, mem::take, sync::Arc,
+};
 
 use crate::{
     compile::rewrite::{
@@ -8,7 +10,7 @@ use crate::{
     },
     transport::{MetaContext, V1CubeMetaDimensionExt},
 };
-use egg::{Analysis, CostFunction, EGraph, Id, Language, RecExpr};
+use egg::{Analysis, EGraph, Id, Language, RecExpr};
 use indexmap::IndexSet;
 
 #[derive(Debug)]
@@ -25,7 +27,7 @@ impl BestCubePlan {
         }
     }
 
-    pub fn initial_cost(&self, enode: &LogicalPlanLanguage, top_down: bool) -> CubePlanCost {
+    pub fn initial_cost(&self, enode: &LogicalPlanLanguage) -> CubePlanCost {
         let table_scans = match enode {
             LogicalPlanLanguage::TableScan(_) => 1,
             _ => 0,
@@ -51,12 +53,6 @@ impl BestCubePlan {
             _ => 0,
         };
 
-        let non_pushed_down_limit_sort = match enode {
-            LogicalPlanLanguage::Limit(_) if !top_down => 1,
-            LogicalPlanLanguage::Sort(_) if top_down => 1,
-            _ => 0,
-        };
-
         let ast_size_inside_wrapper = match enode {
             LogicalPlanLanguage::WrappedSelect(_) => 1,
             _ => 0,
@@ -64,6 +60,7 @@ impl BestCubePlan {
 
         let joins = match enode {
             LogicalPlanLanguage::Join(_) => 1,
+            LogicalPlanLanguage::CrossJoin(_) => 1,
             _ => 0,
         };
 
@@ -118,7 +115,6 @@ impl BestCubePlan {
             LogicalPlanLanguage::GroupAggregateSplitReplacer(_) => 1,
             LogicalPlanLanguage::MemberPushdownReplacer(_) => 1,
             LogicalPlanLanguage::EventNotification(_) => 1,
-            LogicalPlanLanguage::MergedMembersReplacer(_) => 1,
             LogicalPlanLanguage::CaseExprReplacer(_) => 1,
             LogicalPlanLanguage::WrapperPushdownReplacer(_) => 1,
             LogicalPlanLanguage::WrapperPullupReplacer(_) => 1,
@@ -131,6 +127,8 @@ impl BestCubePlan {
             LogicalPlanLanguage::JoinCheckStage(_) => 1,
             LogicalPlanLanguage::JoinCheckPushDown(_) => 1,
             LogicalPlanLanguage::JoinCheckPullUp(_) => 1,
+            LogicalPlanLanguage::SortProjectionPushdownReplacer(_) => 1,
+            LogicalPlanLanguage::SortProjectionPullupReplacer(_) => 1,
             // Not really replacers but those should be deemed as mandatory rewrites and as soon as
             // there's always rewrite rule it's fine to have replacer cost.
             // Needs to be added as alias rewrite always more expensive than original function.
@@ -221,7 +219,8 @@ impl BestCubePlan {
             member_errors,
             non_pushed_down_window,
             non_pushed_down_grouping_sets,
-            non_pushed_down_limit_sort,
+            // Will be filled in finalize
+            non_pushed_down_limit_sort: 0,
             zero_members_wrapper,
             cube_members,
             errors: this_errors,
@@ -247,7 +246,6 @@ impl BestCubePlan {
 
 #[derive(Clone, Copy)]
 pub struct CubePlanCostOptions {
-    top_down: bool,
     penalize_post_processing: bool,
 }
 
@@ -311,71 +309,11 @@ pub enum CubePlanState {
     Wrapper,
 }
 
-impl CubePlanState {
-    pub fn add_child(&self, other: &Self) -> Self {
-        match (self, other) {
-            (CubePlanState::Wrapper, _) => CubePlanState::Wrapper,
-            (_, CubePlanState::Wrapped) => CubePlanState::Wrapped,
-            (CubePlanState::Wrapped, _) => CubePlanState::Wrapped,
-            (CubePlanState::Unwrapped(a), _) => CubePlanState::Unwrapped(*a),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Eq, Hash, PartialEq)]
 pub enum SortState {
     None,
     Current,
     DirectChild,
-}
-
-impl SortState {
-    pub fn add_child(&self, other: &Self) -> Self {
-        match (self, other) {
-            (Self::Current, _) => Self::Current,
-            (_, Self::Current) | (Self::DirectChild, _) => Self::DirectChild,
-            _ => Self::None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct CubePlanCostAndState {
-    pub cost: CubePlanCost,
-    pub state: CubePlanState,
-    pub sort_state: SortState,
-}
-
-impl PartialOrd for CubePlanCostAndState {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cost.cmp(&other.cost))
-    }
-}
-
-impl Ord for CubePlanCostAndState {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.cost.cmp(&other.cost)
-    }
-}
-
-impl CubePlanCostAndState {
-    pub fn add_child(&self, other: &Self) -> Self {
-        Self {
-            cost: self.cost.add_child(&other.cost),
-            state: self.state.add_child(&other.state),
-            sort_state: self.sort_state.add_child(&other.sort_state),
-        }
-    }
-
-    pub fn finalize(&self, enode: &LogicalPlanLanguage, options: CubePlanCostOptions) -> Self {
-        Self {
-            cost: self
-                .cost
-                .finalize(&self.state, &self.sort_state, enode, options),
-            state: self.state.clone(),
-            sort_state: self.sort_state.clone(),
-        }
-    }
 }
 
 impl CubePlanCost {
@@ -467,9 +405,8 @@ impl CubePlanCost {
                 CubePlanState::Wrapper => 0,
             },
             non_pushed_down_limit_sort: match sort_state {
-                SortState::DirectChild => self.non_pushed_down_limit_sort,
-                SortState::Current if options.top_down => self.non_pushed_down_limit_sort,
-                _ => 0,
+                SortState::Current => self.non_pushed_down_limit_sort + 1,
+                _ => self.non_pushed_down_limit_sort,
             },
             // Don't track state here: we want representation that have fewer wrappers with zero members _in total_
             zero_members_wrapper: self.zero_members_wrapper,
@@ -516,60 +453,6 @@ impl CubePlanCost {
             ast_size_inside_wrapper: self.ast_size_inside_wrapper,
             ungrouped_nodes: self.ungrouped_nodes,
         }
-    }
-}
-
-impl CostFunction<LogicalPlanLanguage> for BestCubePlan {
-    type Cost = CubePlanCostAndState;
-    fn cost<C>(&mut self, enode: &LogicalPlanLanguage, mut costs: C) -> Self::Cost
-    where
-        C: FnMut(Id) -> Self::Cost,
-    {
-        let ast_size_outside_wrapper = match enode {
-            LogicalPlanLanguage::Aggregate(_) => 1,
-            LogicalPlanLanguage::Projection(_) => 1,
-            LogicalPlanLanguage::Limit(_) => 1,
-            LogicalPlanLanguage::Sort(_) => 1,
-            LogicalPlanLanguage::Filter(_) => 1,
-            LogicalPlanLanguage::Join(_) => 1,
-            LogicalPlanLanguage::CrossJoin(_) => 1,
-            LogicalPlanLanguage::Union(_) => 1,
-            LogicalPlanLanguage::Window(_) => 1,
-            LogicalPlanLanguage::Subquery(_) => 1,
-            LogicalPlanLanguage::Distinct(_) => 1,
-            _ => 0,
-        };
-
-        let cost = self.initial_cost(enode, false);
-        let initial_cost = CubePlanCostAndState {
-            cost,
-            state: match enode {
-                LogicalPlanLanguage::CubeScanWrapped(CubeScanWrapped(true)) => {
-                    CubePlanState::Wrapped
-                }
-                LogicalPlanLanguage::CubeScanWrapper(_) => CubePlanState::Wrapper,
-                _ => CubePlanState::Unwrapped(ast_size_outside_wrapper),
-            },
-            sort_state: match enode {
-                LogicalPlanLanguage::Sort(_) => SortState::Current,
-                _ => SortState::None,
-            },
-        };
-        let res = enode
-            .children()
-            .iter()
-            .fold(initial_cost.clone(), |cost, id| {
-                let child = costs(*id);
-                cost.add_child(&child)
-            })
-            .finalize(
-                enode,
-                CubePlanCostOptions {
-                    top_down: false,
-                    penalize_post_processing: self.penalize_post_processing,
-                },
-            );
-        res
     }
 }
 
@@ -650,6 +533,9 @@ where
     egraph: &'a EGraph<L, A>,
     // Caches results. `None` for nodes in progress to prevent recursion
     extract_map: HashMap<IdWithState<L, S>, Option<(usize, C)>>,
+    has_deep_recursion: bool,
+    // Cache for second pass to calculate recursive nodes cost.
+    extract_map_recursive_cache: Option<HashMap<IdWithState<L, S>, Option<(usize, C)>>>,
     cost_fn: Arc<CF>,
     root_state: Arc<S>,
 }
@@ -666,6 +552,8 @@ where
         Self {
             egraph,
             extract_map: HashMap::new(),
+            has_deep_recursion: false,
+            extract_map_recursive_cache: None,
             cost_fn: Arc::new(cost_fn),
             root_state: Arc::new(root_state),
         }
@@ -674,8 +562,17 @@ where
     /// Returns cost and path for best plan for provided root eclass.
     ///
     /// If all nodes happen to be recursive, returns `None`.
+    ///
+    /// If there were any nodes with deep recursion, the cost is calculated in two passes;
+    /// the second pass fetches the cost from the extract map obtained on the first pass
+    /// for recursive nodes only.
     pub fn find_best(&mut self, root: Id) -> Option<(C, RecExpr<L>)> {
-        let cost = self.extract(root, Arc::clone(&self.root_state))?;
+        let mut cost = self.extract(root, Arc::clone(&self.root_state))?;
+        if self.has_deep_recursion {
+            self.extract_map_recursive_cache = Some(take(&mut self.extract_map));
+            cost = self.extract(root, Arc::clone(&self.root_state))?;
+        }
+
         let root_id_with_state = IdWithState::new(root, Arc::clone(&self.root_state));
         let root_node = self.choose_node(&root_id_with_state)?;
         let recexpr =
@@ -688,14 +585,33 @@ where
     /// Recursively extracts the cost of each node in the eclass
     /// and returns cost of the node with least cost based on the passed state,
     /// caching the cost together with node index inside eclass in `extract_map`.
+    /// If `extract_map_recursive_cache` is available, fetches the costs
+    /// of deep recursion nodes from there.
     ///
     /// Yields `None` if eclass is already in progress
     /// or all its nodes happen to be recursive.
     fn extract(&mut self, eclass: Id, state: Arc<S>) -> Option<C> {
         let id_with_state = IdWithState::new(eclass, state);
         if let Some(cached_index_and_cost) = self.extract_map.get(&id_with_state) {
-            // TODO: avoid cloning here?
-            return cached_index_and_cost.as_ref().map(|(_, cost)| cost.clone());
+            // If the cost has been computed, return it
+            if let Some((_, cached_cost)) = cached_index_and_cost {
+                // TODO: avoid cloning here?
+                return Some(cached_cost.clone());
+            }
+
+            // If the cost is recursive, fetch from recursive cache if available
+            if let Some(extract_map_recursive_cache) = &self.extract_map_recursive_cache {
+                if let Some(Some((_, cached_cost))) =
+                    extract_map_recursive_cache.get(&id_with_state)
+                {
+                    // TODO: avoid cloning here?
+                    return Some(cached_cost.clone());
+                }
+            }
+
+            // Otherwise, mark this extractor as having deep recursion
+            self.has_deep_recursion = true;
+            return None;
         }
 
         // Mark this eclass as in progress
@@ -714,6 +630,12 @@ where
             // Recursively get children cost
             let mut total_node_cost = this_node_cost;
             for child in node.children() {
+                // If a child is recursive to self, skip this node, as it will never compute
+                // the cost
+                if child == &eclass {
+                    continue 'nodes;
+                }
+
                 let Some(child_cost) = self.extract(*child, Arc::clone(&new_state)) else {
                     // This path is inevitably recursive, try the next node
                     continue 'nodes;
@@ -901,7 +823,7 @@ impl TopDownState<LogicalPlanLanguage> for CubePlanTopDownState {
 
 impl TopDownCostFunction<LogicalPlanLanguage, CubePlanTopDownState, CubePlanCost> for BestCubePlan {
     fn cost(&self, node: &LogicalPlanLanguage) -> CubePlanCost {
-        self.initial_cost(node, true)
+        self.initial_cost(node)
     }
 
     fn finalize(
@@ -916,7 +838,6 @@ impl TopDownCostFunction<LogicalPlanLanguage, CubePlanTopDownState, CubePlanCost
             &state.limit,
             node,
             CubePlanCostOptions {
-                top_down: true,
                 penalize_post_processing: self.penalize_post_processing,
             },
         )

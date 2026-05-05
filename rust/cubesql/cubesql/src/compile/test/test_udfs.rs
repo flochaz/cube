@@ -18,7 +18,7 @@ async fn test_instr() -> Result<(), CubeError> {
                     instr('Rust is killing me', 'unknown') as r3;
                 "
             .to_string(),
-            DatabaseProtocol::MySQL
+            DatabaseProtocol::PostgreSQL
         )
         .await?,
         "+----+----+----+\n\
@@ -26,25 +26,6 @@ async fn test_instr() -> Result<(), CubeError> {
             +----+----+----+\n\
             | 1  | 18 | 0  |\n\
             +----+----+----+"
-    );
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_timediff() -> Result<(), CubeError> {
-    assert_eq!(
-        execute_query(
-            "select \
-                    timediff('1994-11-26T13:25:00.000Z'::timestamp, '1994-11-26T13:25:00.000Z'::timestamp) as r1
-                ".to_string(), DatabaseProtocol::MySQL
-        )
-            .await?,
-        "+------------------------------------------------+\n\
-            | r1                                             |\n\
-            +------------------------------------------------+\n\
-            | 0 years 0 mons 0 days 0 hours 0 mins 0.00 secs |\n\
-            +------------------------------------------------+"
     );
 
     Ok(())
@@ -60,7 +41,7 @@ async fn test_ends_with() -> Result<(), CubeError> {
                     ends_with('rust is killing me', 'no') as r2
                 "
             .to_string(),
-            DatabaseProtocol::MySQL
+            DatabaseProtocol::PostgreSQL
         )
         .await?
     );
@@ -78,7 +59,7 @@ async fn test_locate() -> Result<(), CubeError> {
                     locate('unknown', 'Rust is killing me') as r3
                 "
             .to_string(),
-            DatabaseProtocol::MySQL
+            DatabaseProtocol::PostgreSQL
         )
         .await?,
         "+----+----+----+\n\
@@ -104,7 +85,7 @@ async fn test_if() -> Result<(), CubeError> {
                 if(true, CAST(1 as bigint), CAST(2 as int)) as c3
             "#
             .to_string(),
-            DatabaseProtocol::MySQL
+            DatabaseProtocol::PostgreSQL
         )
         .await?,
         "+-------+-------+------+----+----+----+\n\
@@ -258,7 +239,7 @@ async fn test_ucase() -> Result<(), CubeError> {
                 ucase('super stroka') as r1
             "
             .to_string(),
-            DatabaseProtocol::MySQL
+            DatabaseProtocol::PostgreSQL
         )
         .await?,
         "+--------------+\n\
@@ -266,23 +247,6 @@ async fn test_ucase() -> Result<(), CubeError> {
             +--------------+\n\
             | SUPER STROKA |\n\
             +--------------+"
-    );
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_convert_tz() -> Result<(), CubeError> {
-    assert_eq!(
-        execute_query(
-            "select convert_tz('2021-12-08T15:50:14.337Z'::timestamp, @@GLOBAL.time_zone, '+00:00') as r1;".to_string(), DatabaseProtocol::MySQL
-        )
-            .await?,
-        "+-------------------------+\n\
-            | r1                      |\n\
-            +-------------------------+\n\
-            | 2021-12-08T15:50:14.337 |\n\
-            +-------------------------+"
     );
 
     Ok(())
@@ -1272,6 +1236,118 @@ async fn test_redshift_charindex() -> Result<(), CubeError> {
                     charindex('h', 'abcdefg') none
                 ;"#
             .to_string(),
+            DatabaseProtocol::PostgreSQL
+        )
+        .await?
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_extension_udf_xirr() -> Result<(), CubeError> {
+    init_testing_logger();
+
+    insta::assert_snapshot!(
+        "extension_udf_xirr",
+        // XIRR result may differ between runs, so we truncate the result
+        execute_query(
+            r#"
+            SELECT LEFT(XIRR(payment, date)::text, 10) AS xirr
+            FROM (
+                SELECT '2014-01-01'::date AS date, -10000.0 AS payment
+                UNION ALL
+                SELECT '2014-03-01'::date AS date, 2750.0 AS payment
+                UNION ALL
+                SELECT '2014-10-30'::date AS date, 4250.0 AS payment
+                UNION ALL
+                SELECT '2015-02-15'::date AS date, 3250.0 AS payment
+                UNION ALL
+                SELECT '2015-04-01'::date AS date, 2750.0 AS payment
+            ) AS "t"
+            "#
+            .to_string(),
+            DatabaseProtocol::PostgreSQL
+        )
+        .await?
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_age() -> Result<(), CubeError> {
+    init_testing_logger();
+
+    insta::assert_snapshot!(
+        "age",
+        execute_query(
+            r#"SELECT AGE('2025-06-09T10:09:45'::timestamp, DATE '2023-08-10') AS age;"#
+                .to_string(),
+            DatabaseProtocol::PostgreSQL
+        )
+        .await?
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_age_xid() -> Result<(), CubeError> {
+    init_testing_logger();
+
+    insta::assert_snapshot!(
+        "age_xid",
+        execute_query(
+            r#"SELECT AGE(0::xid) AS age;"#.to_string(),
+            DatabaseProtocol::PostgreSQL
+        )
+        .await?
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_txid_current() -> Result<(), CubeError> {
+    init_testing_logger();
+
+    insta::assert_snapshot!(
+        "txid_current",
+        execute_query(
+            r#"SELECT txid_current();"#.to_string(),
+            DatabaseProtocol::PostgreSQL
+        )
+        .await?
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_pg_is_in_recovery() -> Result<(), CubeError> {
+    init_testing_logger();
+
+    insta::assert_snapshot!(
+        "pg_is_in_recovery",
+        execute_query(
+            r#"SELECT pg_is_in_recovery();"#.to_string(),
+            DatabaseProtocol::PostgreSQL
+        )
+        .await?
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_pg_tablespace_location() -> Result<(), CubeError> {
+    init_testing_logger();
+
+    insta::assert_snapshot!(
+        "pg_tablespace_location",
+        execute_query(
+            r#"SELECT pg_tablespace_location(18000::xid) AS pg_tablespace_location;"#.to_string(),
             DatabaseProtocol::PostgreSQL
         )
         .await?

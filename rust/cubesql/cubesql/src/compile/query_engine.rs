@@ -1,4 +1,3 @@
-use crate::compile::engine::df::planner::CubeQueryPlanner;
 use std::{
     backtrace::Backtrace, collections::HashMap, future::Future, pin::Pin, sync::Arc,
     time::SystemTime,
@@ -8,12 +7,15 @@ use crate::{
     compile::{
         engine::{
             df::{
-                optimizers::{FilterPushDown, FilterSplitMeta, LimitPushDown, SortPushDown},
+                optimizers::{
+                    FilterPushDown, FilterSplitMeta, LimitPushDown, PlanNormalize, SortPushDown,
+                },
+                planner::CubeQueryPlanner,
                 scan::CubeScanNode,
                 wrapper::{CubeScanWrappedSqlNode, CubeScanWrapperNode},
             },
             udf::*,
-            CubeContext, VariablesProvider,
+            CubeContext,
         },
         qtrace::Qtrace,
         rewrite::{
@@ -45,8 +47,8 @@ use datafusion::{
     },
     physical_plan::planner::DefaultPhysicalPlanner,
     sql::{parser::Statement as DFStatement, planner::SqlToRel},
-    variable::VarType,
 };
+use uuid::Uuid;
 
 #[async_trait::async_trait]
 pub trait QueryEngine {
@@ -74,10 +76,12 @@ pub trait QueryEngine {
         state: Arc<SessionState>,
     ) -> Result<DFSessionContext, CompilationError>;
 
-    fn create_logical_plan(
+    async fn create_logical_plan(
         &self,
         cube_ctx: &CubeContext,
         stmt: &Self::AstStatementType,
+        span_id: Option<Arc<SpanId>>,
+        query_planning_id: Option<Uuid>,
     ) -> Result<(LogicalPlan, Self::PlanMetadataType), DataFusionError>;
 
     fn sanitize_statement(&self, stmt: &Self::AstStatementType) -> Self::AstStatementType;
@@ -98,6 +102,7 @@ pub trait QueryEngine {
         let cache_entry = self.get_cache_entry(state.clone()).await?;
 
         let planning_start = SystemTime::now();
+        let query_planning_id = Uuid::new_v4();
         if let Some(span_id) = span_id.as_ref() {
             if let Some(auth_context) = state.auth_context() {
                 self.transport_ref()
@@ -108,6 +113,7 @@ pub trait QueryEngine {
                         "SQL API Query Planning".to_string(),
                         serde_json::json!({
                             "query": span_id.query_key.clone(),
+                            "planningId": query_planning_id.to_string(),
                         }),
                     )
                     .await
@@ -118,18 +124,21 @@ pub trait QueryEngine {
         let ctx = self.create_session_ctx(state.clone())?;
         let cube_ctx = self.create_cube_ctx(state.clone(), meta.clone(), ctx.clone())?;
 
-        let (plan, metadata) = self.create_logical_plan(&cube_ctx, &stmt).map_err(|err| {
-            let message = format!("Initial planning error: {}", err,);
-            let meta = Some(HashMap::from([
-                ("query".to_string(), stmt.to_string()),
-                (
-                    "sanitizedQuery".to_string(),
-                    self.sanitize_statement(&stmt).to_string(),
-                ),
-            ]));
+        let (plan, metadata) = self
+            .create_logical_plan(&cube_ctx, &stmt, span_id.clone(), Some(query_planning_id))
+            .await
+            .map_err(|err| {
+                let message = format!("Initial planning error: {}", err,);
+                let meta = Some(HashMap::from([
+                    ("query".to_string(), stmt.to_string()),
+                    (
+                        "sanitizedQuery".to_string(),
+                        self.sanitize_statement(&stmt).to_string(),
+                    ),
+                ]));
 
-            CompilationError::internal(message).with_meta(meta)
-        })?;
+                CompilationError::internal(message).with_meta(meta)
+            })?;
 
         let mut optimized_plan = plan;
         // ctx.optimize(&plan).map_err(|err| {
@@ -138,6 +147,7 @@ pub trait QueryEngine {
 
         let optimizer_config = OptimizerConfig::new();
         let optimizers: Vec<Arc<dyn OptimizerRule + Sync + Send>> = vec![
+            Arc::new(PlanNormalize::new(&cube_ctx)),
             Arc::new(ProjectionDropOut::new()),
             Arc::new(FilterPushDown::new()),
             Arc::new(SortPushDown::new()),
@@ -170,6 +180,24 @@ pub trait QueryEngine {
                 &mut LogicalPlanToLanguageContext::default(),
             )
             .map_err(|e| CompilationError::internal(e.to_string()))?;
+
+        let rewriting_start = SystemTime::now();
+        if let Some(span_id) = span_id.as_ref() {
+            if let Some(auth_context) = state.auth_context() {
+                self.transport_ref()
+                    .log_load_state(
+                        Some(span_id.clone()),
+                        auth_context,
+                        state.get_load_request_meta("sql"),
+                        "SQL API Plan Rewrite".to_string(),
+                        serde_json::json!({
+                            "planningId": query_planning_id.to_string(),
+                        }),
+                    )
+                    .await
+                    .map_err(|e| CompilationError::internal(e.to_string()))?;
+            }
+        }
 
         let mut finalized_graph = self
             .compiler_cache_ref()
@@ -226,7 +254,6 @@ pub trait QueryEngine {
                 state.auth_context().unwrap(),
                 qtrace,
                 span_id.clone(),
-                self.config_ref().top_down_extractor(),
             )
             .await
             .map_err(|e| match e.cause {
@@ -265,6 +292,24 @@ pub trait QueryEngine {
 
         let rewrite_plan = result?;
 
+        if let Some(span_id) = span_id.as_ref() {
+            if let Some(auth_context) = state.auth_context() {
+                self.transport_ref()
+                    .log_load_state(
+                        Some(span_id.clone()),
+                        auth_context,
+                        state.get_load_request_meta("sql"),
+                        "SQL API Plan Rewrite Success".to_string(),
+                        serde_json::json!({
+                            "planningId": query_planning_id.to_string(),
+                            "duration": rewriting_start.elapsed().unwrap().as_millis() as u64,
+                        }),
+                    )
+                    .await
+                    .map_err(|e| CompilationError::internal(e.to_string()))?;
+            }
+        }
+
         // DF optimizes logical plan (second time) on physical plan creation
         // It's not safety to use all optimizers from DF for OLAP queries, because it will lead to errors
         // From another side, 99% optimizers cannot optimize anything
@@ -291,6 +336,7 @@ pub trait QueryEngine {
                         "SQL API Query Planning Success".to_string(),
                         serde_json::json!({
                             "query": span_id.query_key.clone(),
+                            "planningId": query_planning_id.to_string(),
                             "duration": planning_start.elapsed().unwrap().as_millis() as u64,
                         }),
                     )
@@ -409,31 +455,13 @@ impl QueryEngine for SqlQueryEngine {
             .retain(|r| r.name() != "projection_push_down");
         let mut ctx = DFSessionContext::with_state(df_state);
 
-        if state.protocol == DatabaseProtocol::MySQL {
-            let system_variable_provider =
-                VariablesProvider::new(state.clone(), self.session_manager.server.clone());
-            let user_defined_variable_provider =
-                VariablesProvider::new(state.clone(), self.session_manager.server.clone());
-
-            ctx.register_variable(VarType::System, Arc::new(system_variable_provider));
-            ctx.register_variable(
-                VarType::UserDefined,
-                Arc::new(user_defined_variable_provider),
-            );
-        }
-
         // udf
-        if state.protocol == DatabaseProtocol::MySQL {
-            ctx.register_udf(create_version_udf("8.0.25".to_string()));
-            ctx.register_udf(create_db_udf("database".to_string(), state.clone()));
-            ctx.register_udf(create_db_udf("schema".to_string(), state.clone()));
-            ctx.register_udf(create_current_user_udf(state.clone(), "current_user", true));
-            ctx.register_udf(create_user_udf(state.clone()));
-        } else if state.protocol == DatabaseProtocol::PostgreSQL {
+        if state.protocol == DatabaseProtocol::PostgreSQL {
             ctx.register_udf(create_version_udf(
                 "PostgreSQL 14.2 on x86_64-cubesql".to_string(),
             ));
             ctx.register_udf(create_db_udf("current_database".to_string(), state.clone()));
+            ctx.register_udf(create_db_udf("current_catalog".to_string(), state.clone()));
             ctx.register_udf(create_db_udf("current_schema".to_string(), state.clone()));
             ctx.register_udf(create_current_user_udf(
                 state.clone(),
@@ -452,8 +480,6 @@ impl QueryEngine for SqlQueryEngine {
         ctx.register_udf(create_if_udf());
         ctx.register_udf(create_least_udf());
         ctx.register_udf(create_greatest_udf());
-        ctx.register_udf(create_convert_tz_udf());
-        ctx.register_udf(create_timediff_udf());
         ctx.register_udf(create_time_format_udf());
         ctx.register_udf(create_locate_udf());
         ctx.register_udf(create_date_udf());
@@ -513,9 +539,18 @@ impl QueryEngine for SqlQueryEngine {
         ctx.register_udf(create_to_regtype_udf());
         ctx.register_udf(create_pg_get_indexdef_udf());
         ctx.register_udf(create_inet_server_addr_udf());
+        ctx.register_udf(create_age_udf());
+        ctx.register_udf(create_pg_get_partkeydef_udf());
+        ctx.register_udf(create_pg_relation_size_udf());
+        ctx.register_udf(create_pg_postmaster_start_time_udf());
+        ctx.register_udf(create_txid_current_udf());
+        ctx.register_udf(create_pg_is_in_recovery_udf());
+        ctx.register_udf(create_pg_tablespace_location_udf());
 
         // udaf
         ctx.register_udaf(create_measure_udaf());
+        ctx.register_udaf(create_patch_measure_udaf());
+        ctx.register_udaf(create_xirr_udaf());
 
         // udtf
         ctx.register_udtf(create_generate_series_udtf());
@@ -533,10 +568,12 @@ impl QueryEngine for SqlQueryEngine {
         Ok(ctx)
     }
 
-    fn create_logical_plan(
+    async fn create_logical_plan(
         &self,
         cube_ctx: &CubeContext,
         stmt: &Self::AstStatementType,
+        _span_id: Option<Arc<SpanId>>,
+        _query_planning_id: Option<Uuid>,
     ) -> Result<(LogicalPlan, Self::PlanMetadataType), DataFusionError> {
         let df_query_planner = SqlToRel::new_with_options(cube_ctx, true);
         let plan =

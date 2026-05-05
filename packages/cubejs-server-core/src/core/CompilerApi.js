@@ -1,7 +1,14 @@
 import crypto from 'crypto';
-import R from 'ramda';
-import { createQuery, compile, queryClass, PreAggregations, QueryFactory } from '@cubejs-backend/schema-compiler';
-import { v4 as uuidv4, parse as uuidParse, stringify as uuidStringify } from 'uuid';
+import {
+  createQuery,
+  compile,
+  queryClass,
+  PreAggregations,
+  QueryFactory,
+  prepareCompiler
+} from '@cubejs-backend/schema-compiler';
+import { v4 as uuidv4, parse as uuidParse } from 'uuid';
+import { LRUCache } from 'lru-cache';
 import { NativeInstance } from '@cubejs-backend/native';
 
 export class CompilerApi {
@@ -24,11 +31,31 @@ export class CompilerApi {
     this.convertTzForRawTimeDimension = this.options.convertTzForRawTimeDimension;
     this.schemaVersion = this.options.schemaVersion;
     this.contextToRoles = this.options.contextToRoles;
+    this.contextToGroups = this.options.contextToGroups;
     this.compileContext = options.compileContext;
     this.allowJsDuplicatePropsInSchema = options.allowJsDuplicatePropsInSchema;
     this.sqlCache = options.sqlCache;
     this.standalone = options.standalone;
     this.nativeInstance = this.createNativeInstance();
+    this.compiledScriptCache = new LRUCache({
+      max: options.compilerCacheSize || 250,
+      ttl: options.maxCompilerCacheKeepAlive,
+      updateAgeOnGet: options.updateCompilerCacheKeepAlive
+    });
+
+    // proactively free up old cache values occasionally
+    if (this.options.maxCompilerCacheKeepAlive) {
+      this.compiledScriptCacheInterval = setInterval(
+        () => this.compiledScriptCache.purgeStale(),
+        this.options.maxCompilerCacheKeepAlive
+      );
+    }
+  }
+
+  dispose() {
+    if (this.compiledScriptCacheInterval) {
+      clearInterval(this.compiledScriptCacheInterval);
+    }
   }
 
   setGraphQLSchema(schema) {
@@ -69,6 +96,21 @@ export class CompilerApi {
     return this.compilers;
   }
 
+  /**
+   * Creates the compilers instances without model compilation,
+   * because it could fail and no compilers will be returned.
+   */
+  createCompilerInstances() {
+    return prepareCompiler(this.repository, {
+      allowNodeRequire: this.allowNodeRequire,
+      compileContext: this.compileContext,
+      allowJsDuplicatePropsInSchema: this.allowJsDuplicatePropsInSchema,
+      standalone: this.standalone,
+      nativeInstance: this.nativeInstance,
+      compiledScriptCache: this.compiledScriptCache,
+    });
+  }
+
   async compileSchema(compilerVersion, requestId) {
     const startCompilingTime = new Date().getTime();
     try {
@@ -83,6 +125,7 @@ export class CompilerApi {
         allowJsDuplicatePropsInSchema: this.allowJsDuplicatePropsInSchema,
         standalone: this.standalone,
         nativeInstance: this.nativeInstance,
+        compiledScriptCache: this.compiledScriptCache,
       });
       this.queryFactory = await this.createQueryFactory(compilers);
 
@@ -107,9 +150,9 @@ export class CompilerApi {
   async createQueryFactory(compilers) {
     const { cubeEvaluator } = compilers;
 
-    const cubeToQueryClass = R.fromPairs(
+    const cubeToQueryClass = Object.fromEntries(
       await Promise.all(
-        cubeEvaluator.cubeNames().map(async cube => {
+        cubeEvaluator.cubeNames().map(async (cube) => {
           const dataSource = cubeEvaluator.cubeFromPath(cube).dataSource ?? 'default';
           const dbType = await this.getDbType(dataSource);
           const dialectClass = this.getDialectClass(dataSource, dbType);
@@ -125,7 +168,7 @@ export class CompilerApi {
   }
 
   getDialectClass(dataSource = 'default', dbType) {
-    return this.dialectClass && this.dialectClass({ dataSource, dbType });
+    return this.dialectClass?.({ dataSource, dbType });
   }
 
   async getSqlGenerator(query, dataSource) {
@@ -171,8 +214,8 @@ export class CompilerApi {
       external: sqlGenerator.externalPreAggregationQuery(),
       sql: sqlGenerator.buildSqlAndParams(exportAnnotatedSql),
       lambdaQueries: sqlGenerator.buildLambdaQuery(),
-      timeDimensionAlias: sqlGenerator.timeDimensions[0] && sqlGenerator.timeDimensions[0].unescapedAliasName(),
-      timeDimensionField: sqlGenerator.timeDimensions[0] && sqlGenerator.timeDimensions[0].dimension,
+      timeDimensionAlias: sqlGenerator.timeDimensions[0]?.unescapedAliasName(),
+      timeDimensionField: sqlGenerator.timeDimensions[0]?.dimension,
       order: sqlGenerator.order,
       cacheKeyQueries: sqlGenerator.cacheKeyQueries(),
       preAggregations: sqlGenerator.preAggregations.preAggregationsDescription(),
@@ -201,12 +244,26 @@ export class CompilerApi {
     return new Set(await this.contextToRoles(context));
   }
 
+  async getGroupsFromContext(context) {
+    if (!this.contextToGroups) {
+      return new Set();
+    }
+    return new Set(await this.contextToGroups(context));
+  }
+
   userHasRole(userRoles, role) {
     return userRoles.has(role) || role === '*';
   }
 
+  userHasGroup(userGroups, group) {
+    if (Array.isArray(group)) {
+      return group.some(g => userGroups.has(g) || g === '*');
+    }
+    return userGroups.has(group) || group === '*';
+  }
+
   roleMeetsConditions(evaluatedConditions) {
-    if (evaluatedConditions && evaluatedConditions.length) {
+    if (evaluatedConditions?.length) {
       return evaluatedConditions.reduce((a, b) => {
         if (typeof b !== 'boolean') {
           throw new Error(`Access policy condition must return boolean, got ${JSON.stringify(b)}`);
@@ -234,11 +291,46 @@ export class CompilerApi {
     const cacheKey = `${cube.name}_${this.hashRequestContext(context)}`;
     if (!cache.has(cacheKey)) {
       const userRoles = await this.getRolesFromContext(context);
+      const userGroups = await this.getGroupsFromContext(context);
       const policies = cube.accessPolicy.filter(policy => {
+        // Validate that policy doesn't have both role and group/groups - this is invalid
+        if (policy.role && (policy.group || policy.groups)) {
+          const groupValue = policy.group || policy.groups;
+          const groupDisplay = Array.isArray(groupValue) ? groupValue.join(', ') : groupValue;
+          const groupProp = policy.group ? 'group' : 'groups';
+          throw new Error(
+            `Access policy cannot have both 'role' and '${groupProp}' properties.\nPolicy in cube '${cube.name}' has role '${policy.role}' and ${groupProp} '${groupDisplay}'.\nUse either 'role' or '${groupProp}', not both.`
+          );
+        }
+
+        // Validate that policy doesn't have both group and groups
+        if (policy.group && policy.groups) {
+          const groupDisplay = Array.isArray(policy.group) ? policy.group.join(', ') : policy.group;
+          const groupsDisplay = Array.isArray(policy.groups) ? policy.groups.join(', ') : policy.groups;
+          throw new Error(
+            `Access policy cannot have both 'group' and 'groups' properties.\nPolicy in cube '${cube.name}' has group '${groupDisplay}' and groups '${groupsDisplay}'.\nUse either 'group' or 'groups', not both.`
+          );
+        }
+
         const evaluatedConditions = (policy.conditions || []).map(
           condition => compilers.cubeEvaluator.evaluateContextFunction(cube, condition.if, context)
         );
-        const res = this.userHasRole(userRoles, policy.role) && this.roleMeetsConditions(evaluatedConditions);
+
+        // Check if policy matches by role, group, or groups
+        let hasAccess = false;
+
+        if (policy.role) {
+          hasAccess = this.userHasRole(userRoles, policy.role);
+        } else if (policy.group) {
+          hasAccess = this.userHasGroup(userGroups, policy.group);
+        } else if (policy.groups) {
+          hasAccess = this.userHasGroup(userGroups, policy.groups);
+        } else {
+          // If policy has neither role nor group/groups, default to checking role for backward compatibility
+          hasAccess = this.userHasRole(userRoles, '*');
+        }
+
+        const res = hasAccess && this.roleMeetsConditions(evaluatedConditions);
         return res;
       });
       cache.set(cacheKey, policies);
@@ -299,15 +391,20 @@ export class CompilerApi {
       const filtersMap = cube.isView ? viewFiltersPerCubePerRole : cubeFiltersPerCubePerRole;
 
       if (cubeEvaluator.isRbacEnabledForCube(cube)) {
-        let hasRoleWithAccess = false;
+        let hasAccessPermission = false;
         const userPolicies = await this.getApplicablePolicies(cube, context, compilers);
 
         for (const policy of userPolicies) {
-          hasRoleWithAccess = true;
+          hasAccessPermission = true;
           (policy?.rowLevel?.filters || []).forEach(filter => {
             filtersMap[cubeName] = filtersMap[cubeName] || {};
-            filtersMap[cubeName][policy.role] = filtersMap[cubeName][policy.role] || [];
-            filtersMap[cubeName][policy.role].push(
+            // Create a unique key for the policy (either role, group, or groups)
+            const groupValue = policy.group || policy.groups;
+            const policyKey = policy.role ||
+              (Array.isArray(groupValue) ? groupValue.join(',') : groupValue) ||
+              'default';
+            filtersMap[cubeName][policyKey] = filtersMap[cubeName][policyKey] || [];
+            filtersMap[cubeName][policyKey].push(
               this.evaluateNestedFilter(filter, cube, context, cubeEvaluator)
             );
           });
@@ -320,7 +417,7 @@ export class CompilerApi {
           }
         }
 
-        if (!hasRoleWithAccess) {
+        if (!hasAccessPermission) {
           // This is a hack that will make sure that the query returns no result
           query.segments = query.segments || [];
           query.segments.push({
@@ -360,37 +457,37 @@ export class CompilerApi {
 
   buildFinalRlsFilter(cubeFiltersPerCubePerRole, viewFiltersPerCubePerRole, hasAllowAllForCube) {
     // - delete all filters for cubes where the user has allowAll
-    // - combine the rest into per role maps
-    // - join all filters for the same role with AND
-    // - join all filters for different roles with OR
+    // - combine the rest into per policy maps (policies can be role-based or group-based)
+    // - join all filters for the same policy with AND
+    // - join all filters for different policies with OR
     // - join cube and view filters with AND
 
-    const roleReducer = (filtersMap) => (acc, cubeName) => {
+    const policyReducer = (filtersMap) => (acc, cubeName) => {
       if (!hasAllowAllForCube[cubeName]) {
-        Object.keys(filtersMap[cubeName]).forEach(role => {
-          acc[role] = (acc[role] || []).concat(filtersMap[cubeName][role]);
+        Object.keys(filtersMap[cubeName]).forEach(policyKey => {
+          acc[policyKey] = (acc[policyKey] || []).concat(filtersMap[cubeName][policyKey]);
         });
       }
       return acc;
     };
 
-    const cubeFiltersPerRole = Object.keys(cubeFiltersPerCubePerRole).reduce(
-      roleReducer(cubeFiltersPerCubePerRole),
+    const cubeFiltersPerPolicy = Object.keys(cubeFiltersPerCubePerRole).reduce(
+      policyReducer(cubeFiltersPerCubePerRole),
       {}
     );
-    const viewFiltersPerRole = Object.keys(viewFiltersPerCubePerRole).reduce(
-      roleReducer(viewFiltersPerCubePerRole),
+    const viewFiltersPerPolicy = Object.keys(viewFiltersPerCubePerRole).reduce(
+      policyReducer(viewFiltersPerCubePerRole),
       {}
     );
 
     return this.removeEmptyFilters({
       and: [{
-        or: Object.keys(cubeFiltersPerRole).map(role => ({
-          and: cubeFiltersPerRole[role]
+        or: Object.keys(cubeFiltersPerPolicy).map(policyKey => ({
+          and: cubeFiltersPerPolicy[policyKey]
         }))
       }, {
-        or: Object.keys(viewFiltersPerRole).map(role => ({
-          and: viewFiltersPerRole[role]
+        or: Object.keys(viewFiltersPerPolicy).map(policyKey => ({
+          and: viewFiltersPerPolicy[policyKey]
         }))
       }]
     });
@@ -405,6 +502,11 @@ export class CompilerApi {
     }
   }
 
+  /**
+   *
+   * @param {unknown|undefined} filter
+   * @returns {Promise<Array<PreAggregationInfo>>}
+   */
   async preAggregations(filter) {
     const { cubeEvaluator } = await this.getCompilers();
     return cubeEvaluator.preAggregations(filter);
@@ -575,6 +677,34 @@ export class CompilerApi {
       .map(
         (cube) => ({ [cube]: cubeEvaluator.cubeFromPath(cube).dataSource || 'default' })
       ).reduce((a, b) => ({ ...a, ...b }), {});
+  }
+
+  async memberToDataSource(query) {
+    const { cubeEvaluator } = await this.getCompilers({ requestId: query.requestId });
+
+    const entries = cubeEvaluator
+      .cubeNames()
+      .flatMap(cube => {
+        const cubeDef = cubeEvaluator.cubeFromPath(cube);
+        if (cubeDef.isView) {
+          const viewName = cubeDef.name;
+          return cubeDef.includedMembers?.map(included => {
+            const memberName = `${viewName}.${included.name}`;
+            const refCubeDef = cubeEvaluator.cubeFromPath(included.memberPath);
+            const dataSource = refCubeDef.dataSource ?? 'default';
+            return [memberName, dataSource];
+          }) || [];
+        } else {
+          const cubeName = cubeDef.name;
+          const dataSource = cubeDef.dataSource ?? 'default';
+          return [
+            ...Object.keys(cubeDef.dimensions),
+            ...Object.keys(cubeDef.measures),
+            ...Object.keys(cubeDef.segments),
+          ].map(mem => [`${cubeName}.${mem}`, dataSource]);
+        }
+      });
+    return Object.fromEntries(entries);
   }
 
   async dataSources(orchestratorApi, query) {

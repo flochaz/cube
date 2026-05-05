@@ -16,20 +16,24 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: write
+      id-token: write  # Required for OIDC trusted publishing
     steps:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: 1.84.1
+          toolchain: 1.90.0
           # override: true # this is by default on
           rustflags: ""
           components: rustfmt
-      - name: Install Node.js 20.x
+      - name: Install Node.js 22.x
         uses: actions/setup-node@v4
         with:
-          node-version: 20.x
+          node-version: 22.x
+          registry-url: 'https://registry.npmjs.org/'
+      - name: Upgrade npm for OIDC support
+        run: npm install -g npm@11.7.0
       - name: Get yarn cache directory path
         id: yarn-cache-dir-path
         run: echo "dir=$(yarn cache dir)" >> "$GITHUB_OUTPUT"
@@ -59,12 +63,10 @@ jobs:
         run: yarn lerna run --concurrency 1 build
         env:
           NODE_OPTIONS: --max_old_space_size=4096
-      - name: Set NPM token
-        run: echo //registry.npmjs.org/:_authToken="$NPM_TOKEN" > ~/.npmrc
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: NPM publish
         run: ./node_modules/.bin/lerna publish from-package --yes
+        env:
+          NPM_CONFIG_PROVENANCE: true
 
   native_linux:
     # Please use minimal possible version of ubuntu, because it produces constraint on glibc
@@ -73,7 +75,7 @@ jobs:
     name: Build native Linux ${{ matrix.node-version }} ${{ matrix.target }} Python ${{ matrix.python-version }}
     strategy:
       matrix:
-        node-version: [20]
+        node-version: [22]
         python-version: ["3.9", "3.10", "3.11", "3.12", "fallback"]
         target: ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
         include:
@@ -96,7 +98,7 @@ jobs:
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: 1.84.1
+          toolchain: 1.90.0
           # override: true # this is by default on
           rustflags: ""
           components: rustfmt
@@ -152,17 +154,18 @@ jobs:
     name: Build ${{ matrix.os-version }} ${{ matrix.target }} ${{ matrix.node-version }} Python ${{ matrix.python-version }}
     strategy:
       matrix:
-        node-version: [20.x]
-        os-version: ["macos-13"]
+        node-version: [22.x]
         target: ["x86_64-apple-darwin", "aarch64-apple-darwin"]
         python-version: ["3.9", "3.10", "3.11", "3.12", "fallback"]
         include:
           - target: x86_64-apple-darwin
+            os-version: macos-15-intel
             package_target_arch: x64
             package_target_platform: darwin
             package_target_libc: unknown
             tar_executable: gtar
           - target: aarch64-apple-darwin
+            os-version: macos-14
             package_target_arch: arm64
             package_target_platform: darwin
             package_target_libc: unknown
@@ -186,7 +189,7 @@ jobs:
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: 1.84.1
+          toolchain: 1.90.0
           # override: true # this is by default on
           rustflags: ""
           components: rustfmt
@@ -240,11 +243,11 @@ jobs:
     name: Build ${{ matrix.os-version }} ${{ matrix.node-version }} Python ${{ matrix.python-version }}
     strategy:
       matrix:
-        node-version: [20.x]
+        node-version: [22.x]
         python-version: ["fallback"]
-        os-version: [windows-2019]
+        os-version: [windows-2022]
         include:
-          - os-version: windows-2019
+          - os-version: windows-2022
             package_target_arch: x64
             package_target_platform: win32
             package_target_libc: unknown
@@ -261,7 +264,7 @@ jobs:
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: 1.84.1
+          toolchain: 1.90.0
           # override: true # this is by default on
           rustflags: ""
           components: rustfmt
@@ -590,19 +593,23 @@ jobs:
           - x86_64-unknown-linux-musl
           - aarch64-unknown-linux-gnu
         include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-24.04
+          # Please use minimal possible version of ubuntu, because it produces constraint on glibc
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            image: cubejs/rust-cross:x86_64-unknown-linux-gnu-15082024
             executable_name: cubestored
             strip: true
             compress: false
-          - target: x86_64-unknown-linux-musl
-            os: ubuntu-24.04
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+            image: cubejs/rust-cross:x86_64-unknown-linux-musl-15082024
             executable_name: cubestored
             strip: true
             # cubestored: CantPackException: bad DT_HASH nbucket=0x344  len=0x1890
             compress: false
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04
+          - os: ubuntu-24.04-arm
+            image: cubejs/rust-builder:bullseye-llvm-18
+            target: aarch64-unknown-linux-gnu
             executable_name: cubestored
             # Unable to recognise the format of the input file `rust/cubestore/target/aarch64-unknown-linux-gnu/release/cubestored'
             strip: false
@@ -610,7 +617,7 @@ jobs:
             compress: false
       fail-fast: false
     container:
-      image: cubejs/rust-cross:${{ matrix.target }}-15082024
+      image: ${{ matrix.image }}
     permissions:
       contents: write
     steps:
@@ -618,7 +625,7 @@ jobs:
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: nightly-2024-01-29
+          toolchain: nightly-2025-08-01
           target: ${{ matrix.target }}
           # override: true # this is by default on
           rustflags: ""
@@ -626,7 +633,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ./rust/cubestore -> target
-          prefix-key: v0-rust-cubestore-cross
+          prefix-key: v1-rust-cubestore-cross
           key: target-${{ matrix.target }}
       - name: Build with Cargo
         run: |
@@ -670,7 +677,7 @@ jobs:
           - aarch64-apple-darwin
         include:
           - target: x86_64-pc-windows-msvc
-            os: windows-2019
+            os: windows-2022
             executable_name: cubestored.exe
             strip: true
             # cubestored.exe: CantPackException: superfluous data between sections
@@ -678,7 +685,7 @@ jobs:
             tar_executable: tar
             # Please use minimal possible version of macOS, because it produces constraint on libstdc++
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-15-intel
             executable_name: cubestored
             # upx has been disabled because it is crashing for macOS Ventura or above! It was disabled on 2024-09-05.
             strip: false
@@ -705,7 +712,7 @@ jobs:
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: nightly-2024-01-29
+          toolchain: nightly-2025-08-01
           target: ${{ matrix.target }}
           # override: true # this is by default on
           rustflags: ""

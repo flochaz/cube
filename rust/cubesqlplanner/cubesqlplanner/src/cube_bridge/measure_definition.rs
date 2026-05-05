@@ -1,4 +1,4 @@
-use super::cube_definition::{CubeDefinition, NativeCubeDefinition};
+use super::case_variant::CaseVariant;
 use super::member_order_by::{MemberOrderBy, NativeMemberOrderBy};
 use super::member_sql::{MemberSql, NativeMemberSql};
 use super::struct_with_sql_member::{NativeStructWithSqlMember, StructWithSqlMember};
@@ -15,11 +15,12 @@ use std::rc::Rc;
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
 pub struct TimeShiftReference {
-    pub interval: String,
+    pub interval: Option<String>,
+    pub name: Option<String>,
     #[serde(rename = "type")]
     pub shift_type: Option<String>,
     #[serde(rename = "timeDimension")]
-    pub time_dimension: String,
+    pub time_dimension: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
@@ -57,7 +58,8 @@ pub trait MeasureDefinition {
     #[nbridge(field, optional)]
     fn sql(&self) -> Result<Option<Rc<dyn MemberSql>>, CubeError>;
 
-    fn cube(&self) -> Result<Rc<dyn CubeDefinition>, CubeError>;
+    #[nbridge(field, optional)]
+    fn case(&self) -> Result<Option<CaseVariant>, CubeError>;
 
     #[nbridge(field, optional, vec)]
     fn filters(&self) -> Result<Option<Vec<Rc<dyn StructWithSqlMember>>>, CubeError>;

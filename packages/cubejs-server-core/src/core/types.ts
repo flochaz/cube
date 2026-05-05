@@ -122,6 +122,7 @@ export type DatabaseType =
 
 export type ContextToAppIdFn = (context: RequestContext) => string | Promise<string>;
 export type ContextToRolesFn = (context: RequestContext) => string[] | Promise<string[]>;
+export type ContextToGroupsFn = (context: RequestContext) => string[] | Promise<string[]>;
 export type ContextToOrchestratorIdFn = (context: RequestContext) => string | Promise<string>;
 export type ContextToCubeStoreRouterIdFn = (context: RequestContext) => string | Promise<string>;
 
@@ -167,7 +168,12 @@ export type ExternalDbTypeFn = (context: RequestContext) => DatabaseType;
 export type ExternalDriverFactoryFn = (context: RequestContext) => Promise<BaseDriver> | BaseDriver;
 export type ExternalDialectFactoryFn = (context: RequestContext) => BaseQuery;
 
-export type LoggerFn = (msg: string, params: Record<string, any>) => void;
+export type LoggerFnParams = {
+  // It's possible to fill timestamp at the place of logging, otherwise, it will be filled in automatically
+  timestamp?: string,
+  [key: string]: any,
+};
+export type LoggerFn = (msg: string, params: LoggerFnParams) => void;
 
 export type BiToolSyncConfig = {
   type: string;
@@ -190,6 +196,7 @@ export interface CreateOptions {
   cacheAndQueueDriver?: CacheAndQueryDriverType;
   contextToAppId?: ContextToAppIdFn;
   contextToRoles?: ContextToRolesFn;
+  contextToGroups?: ContextToGroupsFn;
   contextToOrchestratorId?: ContextToOrchestratorIdFn;
   contextToCubeStoreRouterId?: ContextToCubeStoreRouterIdFn;
   contextToApiScopes?: ContextToApiScopesFn;

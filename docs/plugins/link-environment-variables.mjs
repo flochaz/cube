@@ -7,6 +7,7 @@ const isCubeEnvVar = (value) => {
     "CUBEJS_",
     "CUBESTORE_",
     "CUBESQL_",
+    "CUBE_",
   ]
 
   return (
@@ -41,7 +42,7 @@ export default function retextSentenceSpacing() {
             children: [currentNode],
             title: null,
             type: "link",
-            url: `/reference/configuration/environment-variables#${value.toLowerCase()}`
+            url: `/product/configuration/reference/environment-variables#${value.toLowerCase()}`
           };
 
           node.children.splice(index, 1, newNode);

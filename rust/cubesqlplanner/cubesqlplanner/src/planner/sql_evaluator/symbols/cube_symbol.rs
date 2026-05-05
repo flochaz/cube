@@ -15,8 +15,8 @@ pub struct CubeNameSymbol {
 }
 
 impl CubeNameSymbol {
-    pub fn new(cube_name: String) -> Self {
-        Self { cube_name }
+    pub fn new(cube_name: String) -> Rc<Self> {
+        Rc::new(Self { cube_name })
     }
 
     pub fn evaluate_sql(&self) -> Result<String, CubeError> {
@@ -24,6 +24,9 @@ impl CubeNameSymbol {
     }
     pub fn cube_name(&self) -> &String {
         &self.cube_name
+    }
+    pub fn alias(&self) -> String {
+        PlanSqlTemplates::alias_name(&self.cube_name)
     }
 }
 
@@ -69,24 +72,26 @@ impl SymbolFactory for CubeNameSymbolFactory {
 pub struct CubeTableSymbol {
     cube_name: String,
     member_sql: Option<Rc<SqlCall>>,
-    #[allow(dead_code)]
-    definition: Rc<dyn CubeDefinition>,
+    alias: String,
     is_table_sql: bool,
+    join_map: Option<Vec<Vec<String>>>,
 }
 
 impl CubeTableSymbol {
     pub fn new(
         cube_name: String,
         member_sql: Option<Rc<SqlCall>>,
-        definition: Rc<dyn CubeDefinition>,
+        alias: String,
         is_table_sql: bool,
-    ) -> Self {
-        Self {
+        join_map: Option<Vec<Vec<String>>>,
+    ) -> Rc<Self> {
+        Rc::new(Self {
             cube_name,
             member_sql,
-            definition,
+            alias,
             is_table_sql,
-        }
+            join_map,
+        })
     }
 
     pub fn evaluate_sql(
@@ -126,6 +131,14 @@ impl CubeTableSymbol {
     }
     pub fn cube_name(&self) -> &String {
         &self.cube_name
+    }
+
+    pub fn alias(&self) -> String {
+        self.alias.clone()
+    }
+
+    pub fn join_map(&self) -> &Option<Vec<Vec<String>>> {
+        &self.join_map
     }
 }
 
@@ -187,11 +200,17 @@ impl SymbolFactory for CubeTableSymbolFactory {
         } else {
             None
         };
+        let alias = if let Some(alias) = definition.static_data().sql_alias.clone() {
+            alias.clone()
+        } else {
+            PlanSqlTemplates::alias_name(&cube_name)
+        };
         Ok(MemberSymbol::new_cube_table(CubeTableSymbol::new(
             cube_name,
             sql,
-            definition,
+            alias,
             is_table_sql,
+            definition.static_data().join_map.clone(),
         )))
     }
 }

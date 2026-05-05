@@ -1,13 +1,15 @@
 use crate::planner::query_tools::QueryTools;
-use crate::planner::sql_evaluator::{MemberExpressionSymbol, MemberSymbol, SqlCall};
+use crate::planner::sql_evaluator::{
+    MemberExpressionExpression, MemberExpressionSymbol, MemberSymbol, SqlCall,
+};
 use crate::planner::sql_templates::PlanSqlTemplates;
 use crate::planner::{evaluate_with_context, VisitorContext};
 use cubenativeutils::CubeError;
 use std::rc::Rc;
 
+#[derive(Clone)]
 pub struct BaseSegment {
     full_name: String,
-    query_tools: Rc<QueryTools>,
     member_evaluator: Rc<MemberSymbol>,
     cube_name: String,
     name: String,
@@ -27,14 +29,18 @@ impl BaseSegment {
         full_name: Option<String>,
         query_tools: Rc<QueryTools>,
     ) -> Result<Rc<Self>, CubeError> {
-        let member_expression_symbol =
-            MemberExpressionSymbol::new(cube_name.clone(), name.clone(), expression, None);
+        let member_expression_symbol = MemberExpressionSymbol::try_new(
+            cube_name.clone(),
+            name.clone(),
+            MemberExpressionExpression::SqlCall(expression),
+            None,
+            query_tools.base_tools().clone(),
+        )?;
         let full_name = full_name.unwrap_or(member_expression_symbol.full_name());
-        let member_evaluator = Rc::new(MemberSymbol::MemberExpression(member_expression_symbol));
+        let member_evaluator = MemberSymbol::new_member_expression(member_expression_symbol);
 
         Ok(Rc::new(Self {
             full_name,
-            query_tools,
             member_evaluator,
             cube_name,
             name,
@@ -43,14 +49,9 @@ impl BaseSegment {
     pub fn to_sql(
         &self,
         context: Rc<VisitorContext>,
-        templates: &PlanSqlTemplates,
+        plan_templates: &PlanSqlTemplates,
     ) -> Result<String, CubeError> {
-        evaluate_with_context(
-            &self.member_evaluator,
-            self.query_tools.clone(),
-            context,
-            templates,
-        )
+        evaluate_with_context(&self.member_evaluator, context, plan_templates)
     }
 
     pub fn full_name(&self) -> String {
@@ -59,6 +60,12 @@ impl BaseSegment {
 
     pub fn member_evaluator(&self) -> Rc<MemberSymbol> {
         self.member_evaluator.clone()
+    }
+
+    pub fn with_member_evaluator(&self, member_evaluator: Rc<MemberSymbol>) -> Rc<Self> {
+        let mut result = self.clone();
+        result.member_evaluator = member_evaluator;
+        Rc::new(result)
     }
 
     pub fn cube_name(&self) -> &String {

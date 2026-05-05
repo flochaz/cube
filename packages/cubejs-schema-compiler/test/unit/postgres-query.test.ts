@@ -1,9 +1,9 @@
 /* eslint-disable no-restricted-syntax */
 import { PostgresQuery } from '../../src/adapter/PostgresQuery';
-import { prepareCompiler } from './PrepareCompiler';
+import { prepareJsCompiler } from './PrepareCompiler';
 
 describe('PostgresQuery', () => {
-  const { compiler, joinGraph, cubeEvaluator } = prepareCompiler(`
+  const { compiler, joinGraph, cubeEvaluator } = prepareJsCompiler(`
     cube(\`visitors\`, {
       sql: \`
       select * from visitors
@@ -34,6 +34,9 @@ describe('PostgresQuery', () => {
             fiscal_quarter: {
               interval: '1 quarter',
               offset: '1 month',
+            },
+            fiscal_quarter_no_offset: {
+              interval: '1 quarter',
             },
           }
         },
@@ -141,5 +144,264 @@ describe('PostgresQuery', () => {
 
     const queryAndParams = query.buildSqlAndParams();
     expect(queryAndParams[0].split('AT TIME ZONE \'America/Los_Angeles\'').length).toEqual(3);
+  });
+
+  describe('order by clause', () => {
+    it('multi granularity ordered by min granularity (auto)', async () => {
+      await compiler.compile();
+
+      let query = new PostgresQuery({ joinGraph, cubeEvaluator, compiler }, {
+        measures: [
+          'visitors.count'
+        ],
+        timeDimensions: [{
+          dimension: 'visitors.createdAt',
+          granularity: 'month',
+          dateRange: ['2020-01-01', '2020-12-31'],
+        }, {
+          dimension: 'visitors.createdAt',
+          granularity: 'week',
+          dateRange: ['2020-01-01', '2020-12-31'],
+        }, {
+          dimension: 'visitors.createdAt',
+          granularity: 'fiscal_quarter',
+          dateRange: ['2020-01-01', '2020-12-31'],
+        }, {
+          dimension: 'visitors.createdAt',
+          dateRange: ['2020-01-01', '2020-12-31'],
+        }],
+        order: [{ id: 'visitors.createdAt', desc: false }],
+        timezone: 'America/Los_Angeles'
+      });
+
+      let queryAndParams = query.buildSqlAndParams();
+      expect(queryAndParams[0]).toContain('ORDER BY 2 ASC');
+
+      query = new PostgresQuery({ joinGraph, cubeEvaluator, compiler }, {
+        measures: [
+          'visitors.count'
+        ],
+        timeDimensions: [{
+          dimension: 'visitors.createdAt',
+          granularity: 'week',
+          dateRange: ['2020-01-01', '2020-12-31'],
+        }, {
+          dimension: 'visitors.createdAt',
+          granularity: 'fiscal_quarter',
+          dateRange: ['2020-01-01', '2020-12-31'],
+        }, {
+          dimension: 'visitors.createdAt',
+          granularity: 'month',
+          dateRange: ['2020-01-01', '2020-12-31'],
+        }, {
+          dimension: 'visitors.createdAt',
+          dateRange: ['2020-01-01', '2020-12-31'],
+        }],
+        order: [{ id: 'visitors.createdAt', desc: false }],
+        timezone: 'America/Los_Angeles'
+      });
+
+      queryAndParams = query.buildSqlAndParams();
+      expect(queryAndParams[0]).toContain('ORDER BY 1 ASC');
+
+      query = new PostgresQuery({ joinGraph, cubeEvaluator, compiler }, {
+        measures: [
+          'visitors.count'
+        ],
+        timeDimensions: [{
+          dimension: 'visitors.createdAt',
+          granularity: 'year',
+          dateRange: ['2020-01-01', '2020-12-31'],
+        }, {
+          dimension: 'visitors.createdAt',
+          granularity: 'fiscal_quarter_no_offset',
+          dateRange: ['2020-01-01', '2020-12-31'],
+        }, {
+          dimension: 'visitors.createdAt',
+          dateRange: ['2020-01-01', '2020-12-31'],
+        }],
+        order: [{ id: 'visitors.createdAt', desc: false }],
+        timezone: 'America/Los_Angeles'
+      });
+
+      queryAndParams = query.buildSqlAndParams();
+      expect(queryAndParams[0]).toContain('ORDER BY 2 ASC');
+    });
+
+    it('multi granularity ordered by specified granularity', async () => {
+      await compiler.compile();
+
+      let query = new PostgresQuery({ joinGraph, cubeEvaluator, compiler }, {
+        measures: [
+          'visitors.count'
+        ],
+        timeDimensions: [{
+          dimension: 'visitors.createdAt',
+          granularity: 'month',
+          dateRange: ['2020-01-01', '2020-12-31'],
+        }, {
+          dimension: 'visitors.createdAt',
+          granularity: 'week',
+          dateRange: ['2020-01-01', '2020-12-31'],
+        }, {
+          dimension: 'visitors.createdAt',
+          dateRange: ['2020-01-01', '2020-12-31'],
+        }],
+        order: [{ id: 'visitors.createdAt.week', desc: false }],
+        timezone: 'America/Los_Angeles'
+      });
+
+      let queryAndParams = query.buildSqlAndParams();
+      expect(queryAndParams[0]).toContain('ORDER BY 2 ASC');
+
+      query = new PostgresQuery({ joinGraph, cubeEvaluator, compiler }, {
+        measures: [
+          'visitors.count'
+        ],
+        timeDimensions: [{
+          dimension: 'visitors.createdAt',
+          granularity: 'month',
+          dateRange: ['2020-01-01', '2020-12-31'],
+        }, {
+          dimension: 'visitors.createdAt',
+          granularity: 'week',
+          dateRange: ['2020-01-01', '2020-12-31'],
+        }, {
+          dimension: 'visitors.createdAt',
+          dateRange: ['2020-01-01', '2020-12-31'],
+        }],
+        order: [{ id: 'visitors.createdAt.month', desc: false }],
+        timezone: 'America/Los_Angeles'
+      });
+
+      queryAndParams = query.buildSqlAndParams();
+      expect(queryAndParams[0]).toContain('ORDER BY 1 ASC');
+
+      query = new PostgresQuery({ joinGraph, cubeEvaluator, compiler }, {
+        measures: [
+          'visitors.count'
+        ],
+        timeDimensions: [{
+          dimension: 'visitors.createdAt',
+          granularity: 'week',
+          dateRange: ['2020-01-01', '2020-12-31'],
+        }, {
+          dimension: 'visitors.createdAt',
+          granularity: 'month',
+          dateRange: ['2020-01-01', '2020-12-31'],
+        }, {
+          dimension: 'visitors.createdAt',
+          dateRange: ['2020-01-01', '2020-12-31'],
+        }],
+        order: [{ id: 'visitors.createdAt.month', desc: false }],
+        timezone: 'America/Los_Angeles'
+      });
+
+      queryAndParams = query.buildSqlAndParams();
+      expect(queryAndParams[0]).toContain('ORDER BY 2 ASC');
+
+      query = new PostgresQuery({ joinGraph, cubeEvaluator, compiler }, {
+        measures: [
+          'visitors.count'
+        ],
+        timeDimensions: [{
+          dimension: 'visitors.createdAt',
+          granularity: 'week',
+          dateRange: ['2020-01-01', '2020-12-31'],
+        }, {
+          dimension: 'visitors.createdAt',
+          granularity: 'month',
+          dateRange: ['2020-01-01', '2020-12-31'],
+        }, {
+          dimension: 'visitors.createdAt',
+          granularity: 'fiscal_quarter_no_offset',
+          dateRange: ['2020-01-01', '2020-12-31'],
+        }, {
+          dimension: 'visitors.createdAt',
+          dateRange: ['2020-01-01', '2020-12-31'],
+        }],
+        order: [{ id: 'visitors.createdAt.fiscal_quarter_no_offset', desc: false }],
+        timezone: 'America/Los_Angeles'
+      });
+
+      queryAndParams = query.buildSqlAndParams();
+      expect(queryAndParams[0]).toContain('ORDER BY 3 ASC');
+    });
+  });
+
+  it('handles time dimension without granularity in filter', async () => {
+    await compiler.compile();
+
+    const query = new PostgresQuery({ joinGraph, cubeEvaluator, compiler }, {
+      measures: [
+        'visitors.count'
+      ],
+      timeDimensions: [{
+        dimension: 'visitors.createdAt',
+        dateRange: ['2020-01-01', '2020-12-31']
+        // No granularity specified - used only for filtering
+      }],
+      timezone: 'UTC'
+    });
+
+    const queryAndParams = query.buildSqlAndParams();
+    const sql = queryAndParams[0];
+
+    // Time dimensions without granularity should not appear in GROUP BY
+    expect(sql).not.toMatch(/GROUP BY.*created_at/i);
+    
+    // Time dimension should still be used in WHERE clause for filtering
+    expect(sql).toMatch(/WHERE/i);
+  });
+
+  it('handles time dimension with granularity in SELECT and GROUP BY', async () => {
+    await compiler.compile();
+
+    const query = new PostgresQuery({ joinGraph, cubeEvaluator, compiler }, {
+      measures: [
+        'visitors.count'
+      ],
+      timeDimensions: [{
+        dimension: 'visitors.createdAt',
+        granularity: 'day',
+        dateRange: ['2020-01-01', '2020-12-31']
+      }],
+      timezone: 'UTC'
+    });
+
+    const queryAndParams = query.buildSqlAndParams();
+    const sql = queryAndParams[0];
+
+    // Time dimension with granularity should appear in SELECT
+    expect(sql).toMatch(/date_trunc\('day',.*created_at/i);
+    
+    // Time dimension with granularity should appear in GROUP BY
+    expect(sql).toMatch(/GROUP BY/i);
+    
+    // Should still have WHERE clause for filtering
+    expect(sql).toMatch(/WHERE/i);
+  });
+
+  it('uses AS keyword in subquery aliases (regression test)', async () => {
+    await compiler.compile();
+
+    const query = new PostgresQuery({ joinGraph, cubeEvaluator, compiler }, {
+      measures: [
+        'visitors.count',
+        'visitors.unboundedCount'
+      ],
+      timeDimensions: [{
+        dimension: 'visitors.createdAt',
+        granularity: 'day',
+        dateRange: ['2020-01-01', '2020-01-31']
+      }],
+      timezone: 'UTC'
+    });
+
+    const queryAndParams = query.buildSqlAndParams();
+    const sql = queryAndParams[0];
+
+    // PostgreSQL should use AS keyword for subquery aliases
+    expect(sql).toMatch(/\s+AS\s+q_0\s+/);
   });
 });

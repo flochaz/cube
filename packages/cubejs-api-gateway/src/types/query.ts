@@ -5,6 +5,7 @@
  * Network query data types definition.
  */
 
+import { CacheMode } from '@cubejs-backend/shared';
 import {
   Member,
   TimeMember,
@@ -38,14 +39,34 @@ type LogicalOrFilter = {
   or: (QueryFilter | LogicalAndFilter)[]
 };
 
+export type GroupingSetType = 'Rollup' | 'Cube';
+
 type GroupingSet = {
-    groupType: string,
+    groupType: GroupingSetType,
     id: number,
     subId?: null | number
 };
 
+export type EvalPatchMeasureFilterExpression = {
+  sql: Function,
+};
+
+export type PatchMeasureExpression = {
+  type: 'PatchMeasure',
+  sourceMeasure: string,
+  replaceAggregationType: string | null,
+  addFilters: Array<Array<string>>,
+};
+
+export type EvalPatchMeasureExpression = {
+  type: 'PatchMeasure',
+  sourceMeasure: string,
+  replaceAggregationType: string | null,
+  addFilters: Array<EvalPatchMeasureFilterExpression>,
+};
+
 type ParsedMemberExpression = {
-  expression: string[];
+  expression: string[] | PatchMeasureExpression;
   cubeName: string;
   name: string;
   expressionName: string;
@@ -54,7 +75,33 @@ type ParsedMemberExpression = {
 };
 
 type MemberExpression = Omit<ParsedMemberExpression, 'expression'> & {
-  expression: Function;
+  expression: Function | EvalPatchMeasureExpression;
+};
+
+type InputSqlFunction = {
+  cubeParams: Array<string>,
+  sql: string,
+};
+
+export type InputMemberExpressionSqlFunction = {
+  type: 'SqlFunction'
+} & InputSqlFunction;
+
+export type InputMemberExpressionPatchMeasure = {
+  type: 'PatchMeasure',
+  sourceMeasure: string,
+  replaceAggregationType: string | null,
+  addFilters: Array<InputSqlFunction>,
+};
+
+export type InputMemberExpressionExpr = InputMemberExpressionSqlFunction | InputMemberExpressionPatchMeasure;
+
+// This should be aligned with cubesql side
+export type InputMemberExpression = {
+  cubeName: string,
+  alias: string,
+  expr: InputMemberExpressionExpr,
+  groupingSet: GroupingSet | null,
 };
 
 /**
@@ -76,6 +123,8 @@ type SubqueryJoins = {
   alias: string,
 };
 
+type JoinHint = Array<string>;
+
 /**
  * Incoming network query data type.
  */
@@ -91,12 +140,17 @@ interface Query {
   totalQuery?: boolean;
   order?: any;
   timezone?: string;
+  // @deprecated
   renewQuery?: boolean;
+  cacheMode?: CacheMode; // used after query normalization
+  cache?: CacheMode; // Used in public interface
   ungrouped?: boolean;
   responseFormat?: ResultType;
 
   // TODO incoming query, query with parsed exprs and query with evaluated exprs are all different types
   subqueryJoins?: Array<SubqueryJoins>,
+
+  joinHints?: Array<JoinHint>
 }
 
 /**

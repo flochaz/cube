@@ -1,5 +1,6 @@
 use crate::plan::{Expr, MemberExpression, OrderBy};
-use crate::planner::{BaseMember, OrderByItem, QueryProperties};
+use crate::planner::sql_evaluator::MemberSymbol;
+use crate::planner::{OrderByItem, QueryProperties};
 use std::rc::Rc;
 
 pub struct OrderPlanner {
@@ -20,18 +21,18 @@ impl OrderPlanner {
 
     pub fn custom_order(
         order_by: &Vec<OrderByItem>,
-        members: &Vec<Rc<dyn BaseMember>>,
+        members: &Vec<Rc<MemberSymbol>>,
     ) -> Vec<OrderBy> {
         let mut result = Vec::new();
         for itm in order_by.iter() {
-            if let Some((pos, member)) = members
+            for found_item in members
                 .iter()
                 .enumerate()
-                .find(|(_, m)| m.full_name().to_lowercase() == itm.name().to_lowercase())
+                .filter(|(_, m)| m.full_name().to_lowercase() == itm.name().to_lowercase())
             {
                 result.push(OrderBy::new(
-                    Expr::Member(MemberExpression::new(member.clone())),
-                    pos + 1,
+                    Expr::Member(MemberExpression::new(found_item.1.clone())),
+                    found_item.0 + 1,
                     itm.desc(),
                 ));
             }

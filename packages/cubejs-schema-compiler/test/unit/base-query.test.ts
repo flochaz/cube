@@ -1,9 +1,9 @@
 import moment from 'moment-timezone';
 import { BaseQuery, PostgresQuery, MssqlQuery, UserError, CubeStoreQuery } from '../../src';
-import { prepareCompiler, prepareYamlCompiler } from './PrepareCompiler';
+import { prepareJsCompiler, prepareYamlCompiler } from './PrepareCompiler';
 import {
   createCubeSchema,
-  createCubeSchemaWithCustomGranularities,
+  createCubeSchemaWithCustomGranularitiesAndTimeShift,
   createCubeSchemaYaml,
   createECommerceSchema,
   createJoinedCubesSchema,
@@ -34,7 +34,7 @@ describe('SQL Generation', () => {
   });
 
   describe('Common - JS - syntax sugar', () => {
-    const compilers = /** @type Compilers */ prepareCompiler(
+    const compilers = /** @type Compilers */ prepareJsCompiler(
       createCubeSchema({
         name: 'cards',
         sqlTable: 'card_tbl'
@@ -420,8 +420,8 @@ describe('SQL Generation', () => {
   });
 
   describe('Custom granularities', () => {
-    const compilers = /** @type Compilers */ prepareCompiler(
-      createCubeSchemaWithCustomGranularities('orders')
+    const compilers = /** @type Compilers */ prepareJsCompiler(
+      createCubeSchemaWithCustomGranularitiesAndTimeShift('orders')
     );
 
     const granularityQueries = [
@@ -933,7 +933,7 @@ describe('SQL Generation', () => {
   });
 
   describe('Base joins', () => {
-    const compilers = /** @type Compilers */ prepareCompiler([
+    const compilers = /** @type Compilers */ prepareJsCompiler([
       createCubeSchema({
         name: 'cardsA',
         sqlTable: 'card_tbl',
@@ -961,7 +961,7 @@ describe('SQL Generation', () => {
 
     ]);
 
-    it('Base joins - one-one join', async () => {
+    it('one-one join', async () => {
       await compilers.compiler.compile();
 
       const query = new PostgresQuery(compilers, {
@@ -980,7 +980,7 @@ describe('SQL Generation', () => {
       expect(queryAndParams[0]).toContain('LEFT JOIN card3_tbl AS "cards_c" ON "cards_b".other_id = "cards_c".id');
     });
 
-    it('Base joins - multiplied join', async () => {
+    it('multiplied join', async () => {
       await compilers.compiler.compile();
 
       const query = new PostgresQuery(compilers, {
@@ -994,14 +994,61 @@ describe('SQL Generation', () => {
         timezone: 'America/Los_Angeles',
       });
 
-      const queryAndParams = query.buildSqlAndParams();
+      const _queryAndParams = query.buildSqlAndParams();
 
       /* expect(queryAndParams[0]).toContain('LEFT JOIN card2_tbl AS "cards_b" ON "cards_a".other_id = "cards_b".id');
       expect(queryAndParams[0]).toContain('LEFT JOIN card3_tbl AS "cards_c" ON "cards_b".other_id = "cards_c".id'); */
     });
+
+    it('join hint cache', async () => {
+      // Create a schema with a segment that uses FILTER_PARAMS
+      const filterParamsCompilers = /** @type Compilers */ prepareJsCompiler([
+        createCubeSchema({
+          name: 'cardsA',
+          sqlTable: 'card_tbl',
+          joins: `{
+            cardsB: {
+              sql: \`\${CUBE}.other_id = \${cardsB}.id\`,
+              relationship: 'one_to_one'
+            },
+          }`
+        }).replace(`sql: \`\${CUBE}.location = 'San Francisco'\``, `sql: \`\${FILTER_PARAMS.cardsA.location.filter('location')}\``),
+        createCubeSchema({
+          name: 'cardsB',
+          sqlTable: 'card2_tbl',
+        }),
+      ]);
+      await filterParamsCompilers.compiler.compile();
+
+      // First query requires a join
+      const queryWithJoin = new PostgresQuery(filterParamsCompilers, {
+        dimensions: [
+          'cardsA.id',
+          'cardsB.id',
+        ],
+        segments: [
+          'cardsA.sfUsers',
+        ],
+      });
+      const queryAndParamsWithJoin = queryWithJoin.buildSqlAndParams();
+      expect(queryAndParamsWithJoin[0]).toContain('LEFT JOIN card2_tbl AS "cards_b" ON "cards_a".other_id = "cards_b".id');
+
+      // Second query does not require a join and should not be impacted by the first query
+      const queryWithoutJoin = new PostgresQuery(filterParamsCompilers, {
+        dimensions: [
+          'cardsA.id',
+        ],
+        segments: [
+          'cardsA.sfUsers',
+        ],
+      });
+      const queryAndParamsWithoutJoin = queryWithoutJoin.buildSqlAndParams();
+      expect(queryAndParamsWithoutJoin[0]).not.toContain('JOIN');
+    });
   });
+
   describe('Common - JS', () => {
-    const compilers = /** @type Compilers */ prepareCompiler(
+    const compilers = /** @type Compilers */ prepareJsCompiler(
       createCubeSchema({
         name: 'cards',
         refreshKey: `
@@ -1183,7 +1230,7 @@ describe('SQL Generation', () => {
       const utcOffset = moment.tz('America/Los_Angeles').utcOffset() * 60;
       expect(query.everyRefreshKeySql({
         every: '1 hour'
-      })).toEqual(['FLOOR((EXTRACT(EPOCH FROM NOW())) / 3600)', false, expect.any(BaseQuery)]);
+      })).toEqual([`FLOOR((${utcOffset} + EXTRACT(EPOCH FROM NOW())) / 3600)`, false, expect.any(BaseQuery)]);
 
       // Standard syntax (minutes hours day month dow)
       expect(query.everyRefreshKeySql({ every: '0 * * * *', timezone }))
@@ -1224,7 +1271,7 @@ describe('SQL Generation', () => {
   });
 
   describe('refreshKey from schema', () => {
-    const compilers = /** @type Compilers */ prepareCompiler(
+    const compilers = /** @type Compilers */ prepareJsCompiler(
       createCubeSchema({
         name: 'cards',
         refreshKey: `
@@ -1277,20 +1324,24 @@ describe('SQL Generation', () => {
     it('cacheKeyQueries for cube with refreshKey.every (source)', async () => {
       await compilers.compiler.compile();
 
+      const timezone = 'America/Los_Angeles';
+      // Calculate UTC offset dynamically to handle DST changes
+      const utcOffset = moment.tz(timezone).utcOffset() * 60;
+
       const query = new PostgresQuery(compilers, {
         measures: [
           'cards.sum'
         ],
         timeDimensions: [],
         filters: [],
-        timezone: 'America/Los_Angeles',
+        timezone,
       });
 
       // Query should not match any pre-aggregation!
       expect(query.cacheKeyQueries()).toEqual([
         [
           // Postgres dialect
-          'SELECT FLOOR((EXTRACT(EPOCH FROM NOW())) / 600) as refresh_key',
+          `SELECT FLOOR((${utcOffset} + EXTRACT(EPOCH FROM NOW())) / 600) as refresh_key`,
           [],
           {
             // false, because there is no externalQueryClass
@@ -1304,6 +1355,11 @@ describe('SQL Generation', () => {
     it('cacheKeyQueries for cube with refreshKey.every (external)', async () => {
       await compilers.compiler.compile();
 
+      const timezone = 'Europe/London';
+      // Calculate UTC offset dynamically to handle DST changes
+      const utcOffset = moment.tz(timezone).utcOffset() * 60;
+      const utcOffsetPrefix = utcOffset ? `${utcOffset} + ` : '';
+
       // Query should not match any pre-aggregation!
       const query = new PostgresQuery(compilers, {
         measures: [
@@ -1311,7 +1367,7 @@ describe('SQL Generation', () => {
         ],
         timeDimensions: [],
         filters: [],
-        timezone: 'America/Los_Angeles',
+        timezone,
         externalQueryClass: MssqlQuery
       });
 
@@ -1319,7 +1375,7 @@ describe('SQL Generation', () => {
       expect(query.cacheKeyQueries()).toEqual([
         [
           // MSSQL dialect, because externalQueryClass
-          'SELECT FLOOR((DATEDIFF(SECOND,\'1970-01-01\', GETUTCDATE())) / 600) as refresh_key',
+          `SELECT FLOOR((${utcOffsetPrefix}DATEDIFF(SECOND,'1970-01-01', GETUTCDATE())) / 600) as refresh_key`,
           [],
           {
             // true, because externalQueryClass
@@ -1337,13 +1393,17 @@ describe('SQL Generation', () => {
     it('preAggregationsDescription for query - refreshKey every (external)', async () => {
       await compilers.compiler.compile();
 
+      const timezone = 'America/Los_Angeles';
+      // Calculate UTC offset dynamically to handle DST changes
+      const utcOffset = moment.tz(timezone).utcOffset() * 60;
+
       const query = new PostgresQuery(compilers, {
         measures: [
           'cards.count'
         ],
         timeDimensions: [],
         filters: [],
-        timezone: 'America/Los_Angeles',
+        timezone,
         externalQueryClass: MssqlQuery
       });
 
@@ -1352,7 +1412,7 @@ describe('SQL Generation', () => {
       expect(preAggregations[0].invalidateKeyQueries).toEqual([
         [
           // MSSQL dialect
-          'SELECT FLOOR((DATEDIFF(SECOND,\'1970-01-01\', GETUTCDATE())) / 3600) as refresh_key',
+          `SELECT FLOOR((${utcOffset} + DATEDIFF(SECOND,'1970-01-01', GETUTCDATE())) / 3600) as refresh_key`,
           [],
           {
             external: true,
@@ -1395,6 +1455,10 @@ describe('SQL Generation', () => {
     it('preAggregationsDescription for query - refreshKey incremental (timeDimensions range)', async () => {
       await compilers.compiler.compile();
 
+      const timezone = 'Asia/Tokyo';
+      // Calculate UTC offset dynamically to handle any timezone changes
+      const utcOffset = moment.tz(timezone).utcOffset() * 60;
+
       const query = new PostgresQuery(compilers, {
         measures: [
           'cards.min'
@@ -1405,7 +1469,7 @@ describe('SQL Generation', () => {
           dateRange: ['2016-12-30', '2017-01-05']
         }],
         filters: [],
-        timezone: 'America/Los_Angeles',
+        timezone,
         externalQueryClass: MssqlQuery
       });
 
@@ -1413,7 +1477,7 @@ describe('SQL Generation', () => {
       expect(preAggregations.length).toEqual(1);
       expect(preAggregations[0].invalidateKeyQueries).toEqual([
         [
-          'SELECT CASE\n    WHEN CURRENT_TIMESTAMP < CAST(@_1 AS DATETIMEOFFSET) THEN FLOOR((DATEDIFF(SECOND,\'1970-01-01\', GETUTCDATE())) / 3600) END as refresh_key',
+          `SELECT CASE\n    WHEN CURRENT_TIMESTAMP < CAST(@_1 AS DATETIMEOFFSET) THEN FLOOR((${utcOffset} + DATEDIFF(SECOND,'1970-01-01', GETUTCDATE())) / 3600) END as refresh_key`,
           [
             '__TO_PARTITION_RANGE',
           ],
@@ -1430,7 +1494,7 @@ describe('SQL Generation', () => {
   });
 
   describe('refreshKey only cube (immutable)', () => {
-    /** @type Compilers */ prepareCompiler(
+    /** @type Compilers */ prepareJsCompiler(
       createCubeSchema({
         name: 'cards',
         refreshKey: `
@@ -1454,7 +1518,7 @@ describe('SQL Generation', () => {
   });
 
   describe('refreshKey only cube (every)', () => {
-    const compilers = /** @type Compilers */ prepareCompiler(
+    const compilers = /** @type Compilers */ prepareJsCompiler(
       createCubeSchema({
         name: 'cards',
         refreshKey: `
@@ -1479,6 +1543,10 @@ describe('SQL Generation', () => {
     it('refreshKey from cube (source)', async () => {
       await compilers.compiler.compile();
 
+      const timezone = 'America/Los_Angeles';
+      // Calculate UTC offset dynamically to handle DST changes
+      const utcOffset = moment.tz(timezone).utcOffset() * 60;
+
       const query = new PostgresQuery(compilers, {
         measures: [
           'cards.count'
@@ -1489,14 +1557,14 @@ describe('SQL Generation', () => {
           dateRange: ['2016-12-30', '2017-01-05']
         }],
         filters: [],
-        timezone: 'America/Los_Angeles',
+        timezone,
       });
 
       const preAggregations: any = query.newPreAggregations().preAggregationsDescription();
       expect(preAggregations.length).toEqual(1);
       expect(preAggregations[0].invalidateKeyQueries).toEqual([
         [
-          'SELECT FLOOR((EXTRACT(EPOCH FROM NOW())) / 600) as refresh_key',
+          `SELECT FLOOR((${utcOffset} + EXTRACT(EPOCH FROM NOW())) / 600) as refresh_key`,
           [],
           {
             external: false,
@@ -1509,6 +1577,10 @@ describe('SQL Generation', () => {
     it('refreshKey from cube (external)', async () => {
       await compilers.compiler.compile();
 
+      const timezone = 'America/Los_Angeles';
+      // Calculate UTC offset dynamically to handle DST changes
+      const utcOffset = moment.tz(timezone).utcOffset() * 60;
+
       const query = new PostgresQuery(compilers, {
         measures: [
           'cards.count'
@@ -1519,7 +1591,7 @@ describe('SQL Generation', () => {
           dateRange: ['2016-12-30', '2017-01-05']
         }],
         filters: [],
-        timezone: 'America/Los_Angeles',
+        timezone,
         externalQueryClass: MssqlQuery
       });
 
@@ -1527,7 +1599,7 @@ describe('SQL Generation', () => {
       expect(preAggregations.length).toEqual(1);
       expect(preAggregations[0].invalidateKeyQueries).toEqual([
         [
-          'SELECT FLOOR((DATEDIFF(SECOND,\'1970-01-01\', GETUTCDATE())) / 600) as refresh_key',
+          `SELECT FLOOR((${utcOffset} + DATEDIFF(SECOND,'1970-01-01', GETUTCDATE())) / 600) as refresh_key`,
           [],
           {
             external: true,
@@ -1539,7 +1611,7 @@ describe('SQL Generation', () => {
   });
 
   it('refreshKey (sql + every) in cube', async () => {
-    const compilers = /** @type Compilers */ prepareCompiler(
+    const compilers = /** @type Compilers */ prepareJsCompiler(
       createCubeSchema({
         name: 'cards',
         refreshKey: `
@@ -1588,7 +1660,7 @@ describe('SQL Generation', () => {
   });
 
   it('refreshKey (sql + every) in preAggregation', async () => {
-    const compilers = /** @type Compilers */ prepareCompiler(
+    const compilers = /** @type Compilers */ prepareJsCompiler(
       createCubeSchema({
         name: 'cards',
         refreshKey: '',
@@ -2033,6 +2105,168 @@ describe('SQL Generation', () => {
     FROM
       (select * from order where (type = ?)) AS "order"  WHERE ("order".type = ?) AND ("order".category = ?)`);
     });
+
+    it('view referencing cube with FILTER_PARAMS - multiple filters and complex query', async () => {
+      /** @type {Compilers} */
+      const viewCompiler = prepareYamlCompiler(
+        createSchemaYaml({
+          cubes: [{
+            name: 'Product',
+            sql: 'select * from products where {FILTER_PARAMS.Product.category.filter(\'category\')} and {FILTER_PARAMS.Product.status.filter(\'status\')}',
+            measures: [
+              {
+                name: 'count',
+                type: 'count',
+              },
+              {
+                name: 'revenue',
+                sql: 'price',
+                type: 'sum',
+              }
+            ],
+            dimensions: [
+              {
+                name: 'category',
+                sql: 'category',
+                type: 'string'
+              },
+              {
+                name: 'status',
+                sql: 'status',
+                type: 'string'
+              },
+              {
+                name: 'name',
+                sql: 'name',
+                type: 'string'
+              }
+            ]
+          }],
+          views: [{
+            name: 'product_analytics',
+            cubes: [{
+              join_path: 'Product',
+              prefix: true,
+              includes: [
+                'category',
+                'status',
+                'name',
+                'count',
+                'revenue'
+              ]
+            }]
+          }]
+        })
+      );
+
+      await viewCompiler.compiler.compile();
+      const query = new PostgresQuery(viewCompiler, {
+        measures: ['product_analytics.Product_count', 'product_analytics.Product_revenue'],
+        dimensions: ['product_analytics.Product_name'],
+        filters: [
+          {
+            member: 'product_analytics.Product_category',
+            operator: 'equals',
+            values: ['electronics'],
+          },
+          {
+            member: 'product_analytics.Product_status',
+            operator: 'equals',
+            values: ['active'],
+          },
+        ],
+      });
+      const queryAndParams = query.buildSqlAndParams();
+      const queryString = queryAndParams[0];
+
+      expect(queryString).toContain('select * from products where (category = $1) and (status = $2)');
+      expect(queryString).toMatch(/SELECT\s+"product"\.name/);
+      expect(queryString).toMatch(/count\(\*\)/);
+      expect(queryString).toMatch(/sum\("product"\.price\)/);
+      expect(queryString).toContain('WHERE ("product".category = $3) AND ("product".status = $4)');
+      expect(queryAndParams[1]).toEqual(['electronics', 'active', 'electronics', 'active']);
+    });
+
+    it('cube with FILTER_PARAMS in measure filters - triggers backAlias collection', async () => {
+      /** @type {Compilers} */
+      const filterParamsCompiler = prepareYamlCompiler(
+        createSchemaYaml({
+          cubes: [{
+            name: 'Sales',
+            sql: 'select * from sales',
+            measures: [
+              {
+                name: 'count',
+                type: 'count',
+              },
+              {
+                name: 'filtered_revenue',
+                sql: 'amount',
+                type: 'sum',
+                // This measure filter with FILTER_PARAMS should trigger backAlias collection
+                // when evaluating symbols
+                filters: [
+                  { sql: '{FILTER_PARAMS.Sales.category.filter(\'category\')}' }
+                ]
+              }
+            ],
+            dimensions: [
+              {
+                name: 'id',
+                sql: 'id',
+                type: 'number',
+                primaryKey: true
+              },
+              {
+                name: 'category',
+                sql: 'category',
+                type: 'string'
+              },
+              {
+                name: 'region',
+                sql: 'region',
+                type: 'string'
+              }
+            ]
+          }],
+          views: [{
+            name: 'sales_analytics',
+            cubes: [{
+              join_path: 'Sales',
+              prefix: true,
+              includes: [
+                'count',
+                'filtered_revenue',
+                'category',
+                'region'
+              ]
+            }]
+          }]
+        })
+      );
+
+      await filterParamsCompiler.compiler.compile();
+
+      const query = new PostgresQuery(filterParamsCompiler, {
+        measures: ['sales_analytics.Sales_filtered_revenue'],
+        dimensions: ['sales_analytics.Sales_region'],
+        filters: [
+          {
+            member: 'sales_analytics.Sales_category',
+            operator: 'equals',
+            values: ['electronics'],
+          },
+        ],
+      });
+
+      const queryAndParams = query.buildSqlAndParams();
+      const queryString = queryAndParams[0];
+
+      expect(queryString).toContain('CASE WHEN (((category = $1)))');
+      expect(queryString).toMatch(/sum.*CASE WHEN/);
+      expect(queryString).toContain('WHERE ("sales".category = $2)');
+      expect(queryAndParams[1]).toEqual(['electronics', 'electronics']);
+    });
   });
 
   describe('FILTER_GROUP', () => {
@@ -2331,7 +2565,7 @@ describe('SQL Generation', () => {
 
 describe('Class unit tests', () => {
   it('Test BaseQuery with unaliased cube', async () => {
-    const set = /** @type Compilers */ prepareCompiler(`
+    const set = /** @type Compilers */ prepareJsCompiler(`
       cube('CamelCaseCube', {
         sql: 'SELECT * FROM TABLE_NAME',
         measures: {
@@ -2378,7 +2612,7 @@ describe('Class unit tests', () => {
   });
 
   it('Test BaseQuery with aliased cube', async () => {
-    const set = /** @type Compilers */ prepareCompiler(`
+    const set = /** @type Compilers */ prepareJsCompiler(`
       cube('CamelCaseCube', {
         sql: 'SELECT * FROM TABLE_NAME',
         sqlAlias: 'T1',
@@ -2427,7 +2661,7 @@ describe('Class unit tests', () => {
   });
 
   it('Test BaseQuery columns order for the query with the sub-query', async () => {
-    const joinedSchemaCompilers = prepareCompiler(createJoinedCubesSchema());
+    const joinedSchemaCompilers = prepareJsCompiler(createJoinedCubesSchema());
     await joinedSchemaCompilers.compiler.compile();
     await joinedSchemaCompilers.compiler.compile();
     const query = new BaseQuery({

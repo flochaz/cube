@@ -377,6 +377,7 @@ describe('API Gateway', () => {
           queryType: 'regularQuery',
           normalizedQueries: [
             {
+              cacheMode: 'stale-if-slow',
               measures: ['Foo.bar'],
               timezone: 'UTC',
               filters: [],
@@ -389,6 +390,7 @@ describe('API Gateway', () => {
           ],
           queryOrder: [{ id: 'desc' }],
           pivotQuery: {
+            cacheMode: 'stale-if-slow',
             measures: ['Foo.bar'],
             timezone: 'UTC',
             filters: [],
@@ -436,6 +438,7 @@ describe('API Gateway', () => {
       (res) => {
         expect(res.body.normalizedQueries).toStrictEqual([
           {
+            cacheMode: 'stale-if-slow',
             measures: ['Foo.bar'],
             timezone: 'UTC',
             filters: [{
@@ -511,6 +514,7 @@ describe('API Gateway', () => {
           queryType: 'regularQuery',
           normalizedQueries: [
             {
+              cacheMode: 'stale-if-slow',
               measures: ['Foo.bar'],
               timezone: 'UTC',
               filters: [],
@@ -523,6 +527,7 @@ describe('API Gateway', () => {
           ],
           queryOrder: [{ id: 'desc' }],
           pivotQuery: {
+            cacheMode: 'stale-if-slow',
             measures: ['Foo.bar'],
             timezone: 'UTC',
             filters: [],
@@ -556,6 +561,7 @@ describe('API Gateway', () => {
           queryType: 'regularQuery',
           normalizedQueries: [
             {
+              cacheMode: 'stale-if-slow',
               measures: ['Foo.bar'],
               order: [{ id: 'Foo.bar', desc: true }],
               timezone: 'UTC',
@@ -569,6 +575,7 @@ describe('API Gateway', () => {
           ],
           queryOrder: [{ id: 'desc' }],
           pivotQuery: {
+            cacheMode: 'stale-if-slow',
             measures: ['Foo.bar'],
             order: [{ id: 'Foo.bar', desc: true }],
             timezone: 'UTC',
@@ -771,6 +778,21 @@ describe('API Gateway', () => {
   });
 
   describe('sql api member expressions evaluations', () => {
+    const query = {
+      measures: [
+        // eslint-disable-next-line no-template-curly-in-string
+        '{"cubeName":"sales","alias":"sum_sales_line_i","expr":{"type":"SqlFunction","cubeParams":["sales"],"sql":"SUM(${sales.line_items_price})"},"groupingSet":null}'
+      ],
+      dimensions: [
+        // eslint-disable-next-line no-template-curly-in-string
+        '{"cubeName":"sales","alias":"users_age","expr":{"type":"SqlFunction","cubeParams":["sales"],"sql":"${sales.users_age}"},"groupingSet":null}',
+        // eslint-disable-next-line no-template-curly-in-string
+        '{"cubeName":"sales","alias":"cast_sales_users","expr":{"type":"SqlFunction","cubeParams":["sales"],"sql":"CAST(${sales.users_first_name} AS TEXT)"},"groupingSet":null}'
+      ],
+      segments: [],
+      order: []
+    };
+
     test('throw error if expressions are not allowed', async () => {
       const { apiGateway } = await createApiGateway();
       const request: QueryRequest = {
@@ -779,20 +801,7 @@ describe('API Gateway', () => {
           const errorMessage = message as { error: string };
           expect(errorMessage.error).toEqual('Error: Expressions are not allowed in this context');
         },
-        query: {
-          measures: [
-            // eslint-disable-next-line no-template-curly-in-string
-            '{"cube_name":"sales","alias":"sum_sales_line_i","cube_params":["sales"],"expr":"SUM(${sales.line_items_price})","grouping_set":null}'
-          ],
-          dimensions: [
-            // eslint-disable-next-line no-template-curly-in-string
-            '{"cube_name":"sales","alias":"users_age","cube_params":["sales"],"expr":"${sales.users_age}","grouping_set":null}',
-            // eslint-disable-next-line no-template-curly-in-string
-            '{"cube_name":"sales","alias":"cast_sales_users","cube_params":["sales"],"expr":"CAST(${sales.users_first_name} AS TEXT)","grouping_set":null}'
-          ],
-          segments: [],
-          order: []
-        },
+        query,
         expressionParams: [],
         exportAnnotatedSql: true,
         memberExpressions: false,
@@ -820,20 +829,7 @@ describe('API Gateway', () => {
         res(message) {
           expect(message.hasOwnProperty('sql')).toBe(true);
         },
-        query: {
-          measures: [
-            // eslint-disable-next-line no-template-curly-in-string
-            '{"cube_name":"sales","alias":"sum_sales_line_i","cube_params":["sales"],"expr":"SUM(${sales.line_items_price})","grouping_set":null}'
-          ],
-          dimensions: [
-            // eslint-disable-next-line no-template-curly-in-string
-            '{"cube_name":"sales","alias":"users_age","cube_params":["sales"],"expr":"${sales.users_age}","grouping_set":null}',
-            // eslint-disable-next-line no-template-curly-in-string
-            '{"cube_name":"sales","alias":"cast_sales_users","cube_params":["sales"],"expr":"CAST(${sales.users_first_name} AS TEXT)","grouping_set":null}'
-          ],
-          segments: [],
-          order: []
-        },
+        query,
         expressionParams: [],
         exportAnnotatedSql: true,
         memberExpressions: true,

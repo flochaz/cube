@@ -1,10 +1,10 @@
 {
   "name": "@cubejs-client/vue3",
-  "version": "1.2.27",
+  "version": "1.4.2",
   "engines": {},
   "repository": {
     "type": "git",
-    "url": "https://github.com/cube-js/cube.js.git",
+    "url": "https://github.com/cube-js/cube.git",
     "directory": "packages/cubejs-client-vue3"
   },
   "description": "Vue.js 3 components for cube.js",
@@ -21,32 +21,28 @@
     "test:unit": "vue-cli-service test:unit",
     "test:unit:watch": "vue-cli-service test:unit --watch --require tests/setup.js"
   },
-  "main": "dist/cubejs-client-vue3.js",
+  "main": "dist/cubejs-client-vue3.cjs.js",
   "module": "dist/cubejs-client-vue3.esm.js",
   "files": [
     "dist",
     "src"
   ],
   "dependencies": {
-    "@cubejs-client/core": "1.2.27",
-    "@vue/compiler-sfc": "^3.0.11",
-    "core-js": "^3.6.5",
-    "flush-promises": "^1.0.2",
-    "ramda": "^0.27.0",
-    "vue-loader": "^16.2.0"
+    "@cubejs-client/core": "1.4.2",
+    "ramda": "^0.27.0"
   },
   "devDependencies": {
     "@vue/babel-preset-app": "^5",
     "@vue/cli-plugin-babel": "^5.0",
     "@vue/cli-plugin-eslint": "^5.0",
-    "@vue/cli-plugin-unit-jest": "^5.0",
+    "@vue/cli-plugin-unit-jest": "^5",
     "@vue/cli-service": "^5.0",
     "@vue/test-utils": "^2.4",
-    "@vue/vue2-jest": "^27",
-    "@vue/vue3-jest": "^27",
+    "@vue/vue2-jest": "^29",
+    "@vue/vue3-jest": "^29",
     "babel-core": "7.0.0-bridge.0",
     "babel-eslint": "^10.1.0",
-    "babel-jest": "^27",
+    "babel-jest": "^29",
     "eslint": "^7.21.0",
     "eslint-plugin-vue": "^6.2.1",
     "vue": "^3.0"

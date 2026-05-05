@@ -108,7 +108,7 @@ export async function runEnvironment(
         default: 'docker',
       }
     })
-    .argv;
+    .parseSync();
   const isLocal = mode === 'local';
   const [composePath, composeFile] = getComposePath(type, fixture, isLocal);
   const compose = new DockerComposeEnvironment(
@@ -119,6 +119,8 @@ export async function runEnvironment(
   compose.withEnvironment({
     CUBEJS_TELEMETRY: 'false',
   });
+  compose.withWaitStrategy('cube', Wait.forListeningPorts());
+  compose.withWaitStrategy('store', Wait.forListeningPorts());
 
   Object.keys(fixture.cube.environment).forEach((key) => {
     const val = fixture.cube.environment[key];

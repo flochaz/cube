@@ -13,7 +13,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use cubesql::compile::engine::df::scan::{
-    convert_transport_response, transform_response, MemberField, RecordBatch, SchemaRef,
+    convert_transport_response, transform_response, CacheMode, MemberField, RecordBatch, SchemaRef,
 };
 use cubesql::compile::engine::df::wrapper::SqlQuery;
 use cubesql::transport::{
@@ -91,6 +91,8 @@ struct LoadRequest {
     streaming: bool,
     #[serde(rename = "queryKey", skip_serializing_if = "Option::is_none")]
     query_key: Option<serde_json::Value>,
+    #[serde(rename = "cacheMode", skip_serializing_if = "Option::is_none")]
+    cache_mode: Option<CacheMode>,
 }
 
 #[derive(Debug, Serialize)]
@@ -142,7 +144,7 @@ impl TransportService for NodeBridgeTransport {
 
         let channel = self.channel.clone();
 
-        let (cube_to_data_source, data_source_to_sql_generator) =
+        let (member_to_data_source, data_source_to_sql_generator) =
             call_raw_js_with_channel_as_callback(
                 self.channel.clone(),
                 self.sql_generators.clone(),
@@ -152,14 +154,14 @@ impl TransportService for NodeBridgeTransport {
                     let obj = v
                         .downcast::<JsObject, _>(cx)
                         .map_err(|e| CubeError::user(e.to_string()))?;
-                    let cube_to_data_source_obj = obj
-                        .get::<JsObject, _, _>(cx, "cubeNameToDataSource")
-                        .map_cube_err("Can't cast cubeNameToDataSource to object")?;
 
-                    let cube_to_data_source =
-                        key_to_values(cx, cube_to_data_source_obj, |cx, v| {
+                    let member_to_data_source_obj = obj
+                        .get::<JsObject, _, _>(cx, "memberToDataSource")
+                        .map_cube_err("Can't cast memberToDataSource to object")?;
+                    let member_to_data_source =
+                        key_to_values(cx, member_to_data_source_obj, |cx, v| {
                             let res = v.downcast::<JsString, _>(cx).map_cube_err(
-                                "Can't cast value to string in cube_to_data_source",
+                                "Can't cast value to string in member_to_data_source",
                             )?;
                             Ok(res.value(cx))
                         })?;
@@ -183,7 +185,7 @@ impl TransportService for NodeBridgeTransport {
                             Ok(res)
                         })?;
 
-                    Ok((cube_to_data_source, data_source_to_sql_generator))
+                    Ok((member_to_data_source, data_source_to_sql_generator))
                 }),
             )
             .await?;
@@ -208,7 +210,7 @@ impl TransportService for NodeBridgeTransport {
         })?;
         Ok(Arc::new(MetaContext::new(
             response.cubes.unwrap_or_default(),
-            cube_to_data_source,
+            member_to_data_source,
             data_source_to_sql_generator,
             compiler_id,
         )))
@@ -287,6 +289,7 @@ impl TransportService for NodeBridgeTransport {
             member_to_alias,
             expression_params,
             streaming: false,
+            cache_mode: None,
         })?;
 
         let response: serde_json::Value = call_js_with_channel_as_callback(
@@ -338,6 +341,7 @@ impl TransportService for NodeBridgeTransport {
         meta: LoadRequestMeta,
         schema: SchemaRef,
         member_fields: Vec<MemberField>,
+        cache_mode: Option<CacheMode>,
     ) -> Result<Vec<RecordBatch>, CubeError> {
         trace!("[transport] Request ->");
 
@@ -371,6 +375,7 @@ impl TransportService for NodeBridgeTransport {
                 member_to_alias: None,
                 expression_params: None,
                 streaming: false,
+                cache_mode: cache_mode.clone(),
             })?;
 
             let result = call_raw_js_with_channel_as_callback(
@@ -527,6 +532,7 @@ impl TransportService for NodeBridgeTransport {
                 member_to_alias: None,
                 expression_params: None,
                 streaming: true,
+                cache_mode: None,
             })?;
 
             let res = call_js_with_stream_as_callback(

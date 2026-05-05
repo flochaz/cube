@@ -52,6 +52,8 @@ const schemaOptions = Joi.object().keys({
     cors: corsOptions,
   }),
   gracefulShutdown: Joi.number().min(0).integer(),
+  serverHeadersTimeout: Joi.number(),
+  serverKeepAliveTimeout: Joi.number(),
   // Additional from WebSocketServerOptions
   processSubscriptionsInterval: Joi.number(),
   webSocketsBasePath: Joi.string(),
@@ -73,6 +75,7 @@ const schemaOptions = Joi.object().keys({
   cacheAndQueueDriver: Joi.string().valid('cubestore', 'memory'),
   contextToAppId: Joi.func(),
   contextToRoles: Joi.func(),
+  contextToGroups: Joi.func(),
   contextToOrchestratorId: Joi.func(),
   contextToCubeStoreRouterId: Joi.func(),
   contextToDataSourceId: Joi.func(),

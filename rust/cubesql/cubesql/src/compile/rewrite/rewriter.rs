@@ -23,7 +23,7 @@ use crate::{
 use datafusion::{
     logical_plan::LogicalPlan, physical_plan::planner::DefaultPhysicalPlanner, scalar::ScalarValue,
 };
-use egg::{EGraph, Extractor, Id, IterationData, Language, Rewrite, Runner, StopReason};
+use egg::{EGraph, Id, IterationData, Language, Rewrite, Runner, StopReason};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -330,7 +330,6 @@ impl Rewriter {
         auth_context: AuthContextRef,
         qtrace: &mut Option<Qtrace>,
         span_id: Option<Arc<SpanId>>,
-        top_down_extractor: bool,
     ) -> Result<LogicalPlan, CubeError> {
         let cube_context = self.cube_context.clone();
         let egraph = self.graph.clone();
@@ -361,26 +360,16 @@ impl Rewriter {
                     Self::run_rewrites(&cube_context, egraph, rules, "final")?;
 
                 // TODO maybe check replacers and penalized_ast_size_outside_wrapper right after extraction?
-                let best = if top_down_extractor {
-                    let mut extractor = TopDownExtractor::new(
-                        &runner.egraph,
-                        BestCubePlan::new(cube_context.meta.clone(), penalize_post_processing),
-                        CubePlanTopDownState::new(),
-                    );
-                    let Some((best_cost, best)) = extractor.find_best(root) else {
-                        return Err(CubeError::internal("Unable to find best plan".to_string()));
-                    };
-                    log::debug!("Best cost: {:#?}", best_cost);
-                    best
-                } else {
-                    let extractor = Extractor::new(
-                        &runner.egraph,
-                        BestCubePlan::new(cube_context.meta.clone(), penalize_post_processing),
-                    );
-                    let (best_cost, best) = extractor.find_best(root);
-                    log::debug!("Best cost: {:#?}", best_cost);
-                    best
+                let mut extractor = TopDownExtractor::new(
+                    &runner.egraph,
+                    BestCubePlan::new(cube_context.meta.clone(), penalize_post_processing),
+                    CubePlanTopDownState::new(),
+                );
+                let Some((best_cost, best)) = extractor.find_best(root) else {
+                    return Err(CubeError::internal("Unable to find best plan".to_string()));
                 };
+                log::debug!("Best cost: {:#?}", best_cost);
+
                 let qtrace_best_graph = if Qtrace::is_enabled() {
                     best.as_ref().to_vec()
                 } else {
@@ -474,12 +463,6 @@ impl Rewriter {
             .unwrap_or(true)
     }
 
-    pub fn top_down_extractor_enabled() -> bool {
-        env::var("CUBESQL_TOP_DOWN_EXTRACTOR")
-            .map(|v| v.to_lowercase() != "false")
-            .unwrap_or(true)
-    }
-
     pub fn rewrite_rules(
         meta_context: Arc<MetaContext>,
         config_obj: Arc<dyn ConfigObj>,
@@ -494,7 +477,7 @@ impl Rewriter {
                 eval_stable_functions,
             ),
             &DateRules::new(config_obj.clone()),
-            &OrderRules::new(),
+            &OrderRules::new(config_obj.clone()),
             &CommonRules::new(config_obj.clone()),
         ];
         let mut rewrites = Vec::new();
@@ -562,7 +545,7 @@ impl egg::RewriteScheduler<LogicalPlanLanguage, LogicalPlanAnalysis> for Increme
             self.current_eclasses.extend(
                 egraph
                     .classes()
-                    .filter(|class| (class.data.iteration_timestamp >= iteration))
+                    .filter(|class| class.data.iteration_timestamp >= iteration)
                     .map(|class| class.id),
             );
         };

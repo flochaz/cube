@@ -1,7 +1,7 @@
 import Joi from 'joi';
 import cronParser from 'cron-parser';
 
-import type { CubeSymbols } from './CubeSymbols';
+import type { CubeSymbols, CubeDefinition } from './CubeSymbols';
 import type { ErrorReporter } from './ErrorReporter';
 
 /* *****************************
@@ -40,6 +40,30 @@ function formatStatePath(state: Joi.State): string {
   }
 
   return '<unknown path>';
+}
+
+function condition(fun, then, otherwise) {
+  return Joi.alternatives().conditional(
+    Joi.ref('.'), {
+      is: Joi.custom((value, helper) => (fun(value) ? value : helper.message({}))),
+      then,
+      otherwise
+    }
+  );
+}
+
+function defined(a) {
+  return typeof a !== 'undefined';
+}
+
+function inherit(a, b) {
+  return Joi.object().keys({ ...a, ...b });
+}
+
+function requireOneOf(...keys) {
+  return Joi.alternatives().try(
+    ...(keys.map((k) => Joi.object().keys({ [k]: Joi.exist().required() })))
+  );
 }
 
 const regexTimeInterval = Joi.string().custom((value, helper) => {
@@ -86,6 +110,14 @@ const GranularityInterval = Joi.string().pattern(/^\d+\s+(second|minute|hour|day
 // Do not allow negative intervals for granularities, while offsets could be negative
 const GranularityOffset = Joi.string().pattern(/^-?(\d+\s+)(second|minute|hour|day|week|month|quarter|year)s?(\s-?\d+\s+(second|minute|hour|day|week|month|quarter|year)s?){0,7}$/, 'granularity offset');
 
+const formatSchema = Joi.alternatives([
+  Joi.string().valid('imageUrl', 'link', 'currency', 'percent', 'number', 'id'),
+  Joi.object().keys({
+    type: Joi.string().valid('link'),
+    label: Joi.string().required()
+  })
+]);
+
 const BaseDimensionWithoutSubQuery = {
   aliases: Joi.array().items(Joi.string()),
   type: Joi.any().valid('string', 'number', 'boolean', 'time', 'geo').required(),
@@ -98,14 +130,13 @@ const BaseDimensionWithoutSubQuery = {
   description: Joi.string(),
   suggestFilterValues: Joi.boolean().strict(),
   enableSuggestions: Joi.boolean().strict(),
-  format: Joi.alternatives([
-    Joi.string().valid('imageUrl', 'link', 'currency', 'percent', 'number', 'id'),
-    Joi.object().keys({
-      type: Joi.string().valid('link'),
-      label: Joi.string().required()
-    })
-  ]),
+  format: formatSchema,
   meta: Joi.any(),
+  values: Joi.when('type', {
+    is: 'switch',
+    then: Joi.array().items(Joi.string()),
+    otherwise: Joi.forbidden()
+  }),
   granularities: Joi.when('type', {
     is: 'time',
     then: Joi.object().pattern(identifierRegex,
@@ -159,16 +190,21 @@ const BaseDimensionWithoutSubQuery = {
             return isValid ? value : helper.message(msg);
           }),
           offset: GranularityOffset.optional(),
+        }),
+        Joi.object().keys({
+          title: Joi.string(),
+          sql: Joi.func().required()
         })
       ])).optional(),
     otherwise: Joi.forbidden()
   })
 };
 
-const BaseDimension = Object.assign({
+const BaseDimension = {
   subQuery: Joi.boolean().strict(),
-  propagateFiltersToSubQuery: Joi.boolean().strict()
-}, BaseDimensionWithoutSubQuery);
+  propagateFiltersToSubQuery: Joi.boolean().strict(),
+  ...BaseDimensionWithoutSubQuery
+};
 
 const FixedRollingWindow = {
   type: Joi.string().valid('fixed'),
@@ -233,30 +269,6 @@ const BaseMeasure = {
   ),
   meta: Joi.any()
 };
-
-function condition(fun, then, otherwise) {
-  return Joi.alternatives().conditional(
-    Joi.ref('.'), {
-      is: Joi.custom((value, helper) => (fun(value) ? value : helper.message({}))),
-      then,
-      otherwise
-    }
-  );
-}
-
-function defined(a) {
-  return typeof a !== 'undefined';
-}
-
-function inherit(a, b) {
-  return Joi.object().keys(Object.assign({}, a, b));
-}
-
-function requireOneOf(...keys) {
-  return Joi.alternatives().try(
-    ...(keys.map((k) => Joi.object().keys({ [k]: Joi.exist().required() })))
-  );
-}
 
 const PreAggregationRefreshKeySchema = condition(
   (s) => defined(s.sql),
@@ -530,7 +542,7 @@ const CubeRefreshKeySchema = condition(
     (s) => defined(s.sql),
     Joi.object().keys({
       sql: Joi.func().required(),
-      // We dont support timezone for this, because it's useless
+      // We don't support timezone for this, because it's useless
       // We cannot support cron interval
       every: everyInterval,
     }),
@@ -557,8 +569,59 @@ const measureTypeWithCount = Joi.string().valid(
 );
 
 const multiStageMeasureType = Joi.string().valid(
-  'count', 'number', 'string', 'boolean', 'time', 'sum', 'avg', 'min', 'max', 'countDistinct', 'runningTotal', 'countDistinctApprox',
+  'count', 'number', 'string', 'boolean', 'time', 'sum', 'avg', 'min', 'max', 'countDistinct', 'runningTotal', 'countDistinctApprox', 'numberAgg',
   'rank'
+);
+
+const timeShiftItemRequired = Joi.object({
+  timeDimension: Joi.func().required(),
+  interval: regexTimeInterval.required(),
+  type: Joi.string().valid('next', 'prior').required(),
+});
+
+const timeShiftItemOptional = Joi.object({
+  timeDimension: Joi.func(), // not required
+  interval: regexTimeInterval,
+  name: identifier,
+  type: Joi.string().valid('next', 'prior'),
+})
+  .xor('name', 'interval')
+  .and('interval', 'type');
+
+const CaseSchema = Joi.object().keys({
+  when: Joi.array().items(Joi.object().keys({
+    sql: Joi.func().required(),
+    label: Joi.alternatives([
+      Joi.string(),
+      Joi.object().keys({
+        sql: Joi.func().required()
+      })
+    ])
+  })),
+  else: Joi.object().keys({
+    label: Joi.alternatives([
+      Joi.string(),
+      Joi.object().keys({
+        sql: Joi.func().required()
+      })
+    ])
+  })
+}).required();
+
+const SwitchCaseSchema = Joi.object().keys({
+  switch: Joi.func().required(),
+  when: Joi.array().items(Joi.object().keys({
+    value: Joi.string().required(),
+    sql: Joi.func().required()
+  })),
+  else: Joi.object().keys({
+    sql: Joi.func().required()
+  })
+}).required();
+
+const CaseVariants = Joi.alternatives().try(
+  CaseSchema,
+  SwitchCaseSchema
 );
 
 const MeasuresSchema = Joi.object().pattern(identifierRegex, Joi.alternatives().conditional(Joi.ref('.multiStage'), [
@@ -568,14 +631,14 @@ const MeasuresSchema = Joi.object().pattern(identifierRegex, Joi.alternatives().
       multiStage: Joi.boolean().strict(),
       type: multiStageMeasureType.required(),
       sql: Joi.func(), // TODO .required(),
+      case: CaseVariants,
       groupBy: Joi.func(),
       reduceBy: Joi.func(),
       addGroupBy: Joi.func(),
-      timeShift: Joi.array().items(Joi.object().keys({
-        timeDimension: Joi.func().required(),
-        interval: regexTimeInterval.required(),
-        type: Joi.string().valid('next', 'prior').required(),
-      })),
+      timeShift: Joi.alternatives().conditional(Joi.array().length(1), {
+        then: Joi.array().items(timeShiftItemOptional),
+        otherwise: Joi.array().items(timeShiftItemRequired)
+      }),
       // TODO validate for order window functions
       orderBy: Joi.array().items(Joi.object().keys({
         sql: Joi.func().required(),
@@ -604,6 +667,66 @@ const MeasuresSchema = Joi.object().pattern(identifierRegex, Joi.alternatives().
     }
   ]
 ));
+
+const CalendarTimeShiftItem = Joi.alternatives().try(
+  Joi.object({
+    name: identifier.required(),
+    interval: regexTimeInterval.required(),
+    type: Joi.string().valid('next', 'prior').required(),
+    sql: Joi.forbidden()
+  }),
+  Joi.object({
+    name: identifier.required(),
+    sql: Joi.func().required(),
+    interval: Joi.forbidden(),
+    type: Joi.forbidden()
+  }),
+  Joi.object({
+    interval: regexTimeInterval.required(),
+    type: Joi.string().valid('next', 'prior').required(),
+    sql: Joi.func().required(),
+    name: Joi.forbidden()
+  })
+);
+
+const SwitchDimension = Joi.object({
+  type: Joi.string().valid('switch').required(),
+  values: Joi.array().items(Joi.string()).min(1).required()
+});
+
+const DimensionsSchema = Joi.object().pattern(identifierRegex, Joi.alternatives().conditional(Joi.ref('.type'), {
+  is: 'switch',
+  then: SwitchDimension,
+  otherwise: Joi.alternatives().try(
+    inherit(BaseDimensionWithoutSubQuery, {
+      case: CaseVariants.required(),
+      multiStage: Joi.boolean().strict(),
+    }),
+    inherit(BaseDimensionWithoutSubQuery, {
+      latitude: Joi.object().keys({
+        sql: Joi.func().required()
+      }).required(),
+      longitude: Joi.object().keys({
+        sql: Joi.func().required()
+      }).required()
+    }),
+    inherit(BaseDimension, {
+      sql: Joi.func().required(),
+    }),
+    inherit(BaseDimension, {
+      multiStage: Joi.boolean().valid(true),
+      sql: Joi.func().required(),
+      addGroupBy: Joi.func(),
+    }),
+    // TODO should be valid only for calendar cubes, but this requires significant refactoring
+    // of all schemas. Left for the future when we'll switch to zod.
+    inherit(BaseDimensionWithoutSubQuery, {
+      type: Joi.any().valid('time').required(),
+      sql: Joi.func().required(),
+      timeShift: Joi.array().items(CalendarTimeShiftItem),
+    })
+  )
+}));
 
 const SegmentsSchema = Joi.object().pattern(identifierRegex, Joi.object().keys({
   aliases: Joi.array().items(Joi.string()),
@@ -675,13 +798,19 @@ const RowLevelPolicySchema = Joi.object().keys({
 }).xor('filters', 'allowAll');
 
 const RolePolicySchema = Joi.object().keys({
-  role: Joi.string().required(),
+  role: Joi.string(),
+  group: Joi.string(),
+  groups: Joi.array().items(Joi.string()),
   memberLevel: MemberLevelPolicySchema,
   rowLevel: RowLevelPolicySchema,
   conditions: Joi.array().items(Joi.object().keys({
     if: Joi.func().required(),
   })),
-});
+})
+  .nand('group', 'groups') // Cannot have both group and groups
+  .nand('role', 'group') // Cannot have both role and group
+  .nand('role', 'groups') // Cannot have both role and groups
+  .or('role', 'group', 'groups'); // Must have at least one
 
 /* *****************************
  * ATTENTION:
@@ -690,12 +819,20 @@ const RolePolicySchema = Joi.object().keys({
  * and update CubePropContextTranspiler.transpiledFieldsPatterns
  **************************** */
 
+const hierarchySchema = Joi.object().pattern(identifierRegex, Joi.object().keys({
+  title: Joi.string(),
+  public: Joi.boolean().strict(),
+  levels: Joi.func()
+}));
+
 const baseSchema = {
   name: identifier,
   refreshKey: CubeRefreshKeySchema,
   fileName: Joi.string().required(),
   extends: Joi.func(),
-  allDefinitions: Joi.func(),
+  allDefinitions: Joi.func(), // Helpers function for extending
+  rawFolders: Joi.func(), // Helpers function for extending
+  rawCubes: Joi.func(), // Helpers function for extending
   title: Joi.string(),
   sqlAlias: Joi.string(),
   dataSource: Joi.string(),
@@ -704,83 +841,56 @@ const baseSchema = {
   shown: Joi.boolean().strict(),
   public: Joi.boolean().strict(),
   meta: Joi.any(),
-  joins: Joi.object().pattern(identifierRegex, Joi.object().keys({
-    sql: Joi.func().required(),
-    relationship: Joi.any().valid(
-      'belongsTo', 'belongs_to', 'many_to_one', 'manyToOne',
-      'hasMany', 'has_many', 'one_to_many', 'oneToMany',
-      'hasOne', 'has_one', 'one_to_one', 'oneToOne'
-    ).required()
-  })),
-  measures: MeasuresSchema,
-  dimensions: Joi.object().pattern(identifierRegex, Joi.alternatives().try(
-    inherit(BaseDimensionWithoutSubQuery, {
-      case: Joi.object().keys({
-        when: Joi.array().items(Joi.object().keys({
-          sql: Joi.func().required(),
-          label: Joi.alternatives([
-            Joi.string(),
-            Joi.object().keys({
-              sql: Joi.func().required()
-            })
-          ])
-        })),
-        else: Joi.object().keys({
-          label: Joi.alternatives([
-            Joi.string(),
-            Joi.object().keys({
-              sql: Joi.func().required()
-            })
-          ])
-        })
-      }).required()
-    }),
-    inherit(BaseDimensionWithoutSubQuery, {
-      latitude: Joi.object().keys({
-        sql: Joi.func().required()
-      }).required(),
-      longitude: Joi.object().keys({
-        sql: Joi.func().required()
-      }).required()
-    }),
-    inherit(BaseDimension, {
-      sql: Joi.func().required()
-    }),
-    inherit(BaseDimension, {
-      multiStage: Joi.boolean().valid(true),
-      type: Joi.any().valid('number').required(),
+  joins: Joi.alternatives([
+    Joi.object().pattern(identifierRegex, Joi.object().keys({
       sql: Joi.func().required(),
-      addGroupBy: Joi.func(),
-    })
-  )),
+      relationship: Joi.any().valid(
+        'belongsTo', 'belongs_to', 'many_to_one', 'manyToOne',
+        'hasMany', 'has_many', 'one_to_many', 'oneToMany',
+        'hasOne', 'has_one', 'one_to_one', 'oneToOne'
+      ).required()
+    })),
+    Joi.array().items(Joi.object().keys({
+      name: identifier.required(),
+      sql: Joi.func().required(),
+      relationship: Joi.any().valid(
+        'belongsTo', 'belongs_to', 'many_to_one', 'manyToOne',
+        'hasMany', 'has_many', 'one_to_many', 'oneToMany',
+        'hasOne', 'has_one', 'one_to_one', 'oneToOne'
+      ).required()
+    }))
+  ]),
+  measures: MeasuresSchema,
+  dimensions: DimensionsSchema,
   segments: SegmentsSchema,
   preAggregations: PreAggregationsAlternatives,
-  folders: Joi.array().items(Joi.object().keys({
-    name: Joi.string().required(),
-    includes: Joi.alternatives([
-      Joi.string().valid('*'),
-      Joi.array().items(Joi.string().required())
-    ]).required(),
-  })),
   accessPolicy: Joi.array().items(RolePolicySchema.required()),
+  hierarchies: hierarchySchema,
 };
 
 const cubeSchema = inherit(baseSchema, {
   sql: Joi.func(),
   sqlTable: Joi.func(),
-  hierarchies: Joi.object().pattern(identifierRegex, Joi.object().keys({
-    title: Joi.string(),
-    public: Joi.boolean().strict(),
-    levels: Joi.func()
-  }))
+  calendar: Joi.boolean().strict(),
 }).xor('sql', 'sqlTable').messages({
   'object.xor': 'You must use either sql or sqlTable within a model, but not both'
 });
 
+const folderSchema = Joi.object().keys({
+  name: Joi.string().required(),
+  includes: Joi.alternatives([
+    Joi.string().valid('*'),
+    Joi.array().items(
+      Joi.alternatives([
+        Joi.string().required(),
+        Joi.link('#folderSchema'), // Can contain nested folders
+      ]),
+    ),
+  ]).required(),
+}).id('folderSchema');
+
 const viewSchema = inherit(baseSchema, {
   isView: Joi.boolean().strict(),
-  includes: Joi.func(),
-  excludes: Joi.func(),
   cubes: Joi.array().items(
     Joi.object().keys({
       joinPath: Joi.func().required(),
@@ -792,8 +902,12 @@ const viewSchema = inherit(baseSchema, {
         Joi.array().items(Joi.alternatives([
           Joi.string().required(),
           Joi.object().keys({
-            name: Joi.string().required(),
-            alias: Joi.string()
+            name: identifier.required(),
+            alias: identifier,
+            title: Joi.string(),
+            description: Joi.string(),
+            format: formatSchema,
+            meta: Joi.any(),
           })
         ]))
       ]).required(),
@@ -802,8 +916,7 @@ const viewSchema = inherit(baseSchema, {
       'object.oxor': 'Using split together with prefix is not supported'
     })
   ),
-  accessPolicy: Joi.array().items(RolePolicySchema.required()),
-  hierarchies: Joi.any()
+  folders: Joi.array().items(folderSchema),
 });
 
 function formatErrorMessageFromDetails(explain, d) {
@@ -880,18 +993,22 @@ export class CubeValidator {
   }
 
   public validate(cube, errorReporter: ErrorReporter) {
-    const result = cube.isView ? viewSchema.validate(cube) : cubeSchema.validate(cube);
+    const options = {
+      nonEnumerables: true,
+      abortEarly: false, // This will allow all errors to be reported, not just the first one
+    };
+    const result = cube.isView ? viewSchema.validate(cube, options) : cubeSchema.validate(cube, options);
 
     if (result.error != null) {
-      errorReporter.error(formatErrorMessage(result.error), result.error);
+      errorReporter.error(formatErrorMessage(result.error));
     } else {
-      this.validCubes[cube.name] = true;
+      this.validCubes.set(cube.name, true);
     }
 
     return result;
   }
 
-  public isCubeValid(cube) {
-    return this.validCubes[cube.name] || cube.isSplitView;
+  public isCubeValid(cube: CubeDefinition): boolean {
+    return this.validCubes.get(cube.name) ?? cube.isSplitView ?? false;
   }
 }

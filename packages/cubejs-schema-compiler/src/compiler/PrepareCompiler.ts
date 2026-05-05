@@ -1,12 +1,15 @@
 import { SchemaFileRepository } from '@cubejs-backend/shared';
 import { NativeInstance } from '@cubejs-backend/native';
 import { v4 as uuidv4 } from 'uuid';
+import { LRUCache } from 'lru-cache';
+import vm from 'vm';
 
 import { CubeValidator } from './CubeValidator';
 import { DataSchemaCompiler } from './DataSchemaCompiler';
 import {
   CubeCheckDuplicatePropTranspiler,
   CubePropContextTranspiler,
+  IIFETranspiler,
   ImportExportTranspiler,
   TranspilerInterface,
   ValidationTranspiler,
@@ -21,6 +24,7 @@ import { CubeToMetaTransformer } from './CubeToMetaTransformer';
 import { CompilerCache } from './CompilerCache';
 import { YamlCompiler } from './YamlCompiler';
 import { ViewCompilationGate } from './ViewCompilationGate';
+import type { ErrorReporter } from './ErrorReporter';
 
 export type PrepareCompilerOptions = {
   nativeInstance?: NativeInstance,
@@ -32,7 +36,14 @@ export type PrepareCompilerOptions = {
   standalone?: boolean;
   headCommitId?: string;
   adapter?: string;
+  compiledScriptCache?: LRUCache<string, vm.Script>;
+  compiledYamlCache?: LRUCache<string, string>;
+  compiledJinjaCache?: LRUCache<string, string>;
 };
+
+export interface CompilerInterface {
+  compile: (cubes: any[], errorReporter: ErrorReporter) => void;
+}
 
 export const prepareCompiler = (repo: SchemaFileRepository, options: PrepareCompilerOptions = {}) => {
   const nativeInstance = options.nativeInstance || new NativeInstance();
@@ -49,10 +60,15 @@ export const prepareCompiler = (repo: SchemaFileRepository, options: PrepareComp
   const compilerCache = new CompilerCache({ maxQueryCacheSize, maxQueryCacheAge });
   const yamlCompiler = new YamlCompiler(cubeSymbols, cubeDictionary, nativeInstance, viewCompiler);
 
+  const compiledScriptCache = options.compiledScriptCache || new LRUCache<string, vm.Script>({ max: 250 });
+  const compiledYamlCache = options.compiledYamlCache || new LRUCache<string, string>({ max: 250 });
+  const compiledJinjaCache = options.compiledJinjaCache || new LRUCache<string, string>({ max: 250 });
+
   const transpilers: TranspilerInterface[] = [
     new ValidationTranspiler(),
     new ImportExportTranspiler(),
     new CubePropContextTranspiler(cubeSymbols, cubeDictionary, viewCompiler),
+    new IIFETranspiler(),
   ];
 
   if (!options.allowJsDuplicatePropsInSchema) {
@@ -61,18 +77,22 @@ export const prepareCompiler = (repo: SchemaFileRepository, options: PrepareComp
 
   const compilerId = uuidv4();
 
-  const compiler = new DataSchemaCompiler(repo, Object.assign({}, {
+  const compiler = new DataSchemaCompiler(repo, {
     cubeNameCompilers: [cubeDictionary],
     preTranspileCubeCompilers: [cubeSymbols, cubeValidator],
     transpilers,
     viewCompilationGate,
+    compiledScriptCache,
+    compiledYamlCache,
+    compiledJinjaCache,
     viewCompilers: [viewCompiler],
     cubeCompilers: [cubeEvaluator, joinGraph, metaTransformer],
     contextCompilers: [contextEvaluator],
     cubeFactory: cubeSymbols.createCube.bind(cubeSymbols),
     compilerCache,
     cubeDictionary,
-    cubeSymbols,
+    cubeOnlySymbols: cubeSymbols,
+    cubeAndViewSymbols: viewCompiler,
     extensions: {
       Funnels,
       RefreshKeys,
@@ -83,7 +103,8 @@ export const prepareCompiler = (repo: SchemaFileRepository, options: PrepareComp
     nativeInstance,
     yamlCompiler,
     compilerId,
-  }, options));
+    ...options
+  });
 
   return {
     compiler,

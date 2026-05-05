@@ -19,19 +19,17 @@ use datafusion::{
     arrow::array::Array, dataframe::DataFrame as DFDataFrame,
     physical_plan::SendableRecordBatchStream,
 };
-use futures::*;
+use futures::{FutureExt, Stream, StreamExt};
 use pg_srv::protocol::{CommandComplete, PortalCompletion, PortalSuspended};
 
 use crate::transport::SpanId;
 use async_stream::stream;
-use futures_core::stream::Stream;
-use futures_util::stream::StreamExt;
 
 #[derive(Debug)]
 pub struct Cursor {
-    pub query: ast::Statement,
+    pub query: Box<ast::Statement>,
     // WITH HOLD specifies that the cursor can continue to be used after the transaction that created it successfully commits.
-    // WITHOUT HOLD specifies that the cursor cannot be used outside of the transaction that created it.
+    // WITHOUT HOLD specifies that the cursor cannot be used outside the transaction that created it.
     pub hold: bool,
     // What format will be used for Cursor
     pub format: protocol::Format,
@@ -39,7 +37,7 @@ pub struct Cursor {
 
 #[derive(Debug)]
 pub enum PreparedStatement {
-    // Postgres allows to define prepared statement on empty query: "",
+    // Postgres allows defining a prepared statement on an empty query: "",
     // then it requires special handling in the protocol
     Empty {
         /// Prepared statement can be declared from SQL or protocol (Parser)
@@ -51,10 +49,10 @@ pub enum PreparedStatement {
         /// Prepared statement can be declared from SQL or protocol (Parser)
         from_sql: bool,
         created: DateTime<Utc>,
-        query: ast::Statement,
+        query: Box<ast::Statement>,
         parameters: protocol::ParameterDescription,
-        /// Fields which will be returned to the client, It can be None if server doesnt return any field
-        /// for example BEGIN
+        /// Fields which will be returned to the client; It can be None if the server doesn't return any field,
+        /// for example, BEGIN
         description: Option<protocol::RowDescription>,
         span_id: Option<Arc<SpanId>>,
     },
@@ -109,7 +107,7 @@ impl PreparedStatement {
             .into()),
             PreparedStatement::Query { query, .. } => {
                 let binder = PostgresStatementParamsBinder::new(values);
-                let mut statement = query.clone();
+                let mut statement = query.as_ref().clone();
                 binder.bind(&mut statement)?;
 
                 Ok(statement)
@@ -203,6 +201,7 @@ pub enum PortalFrom {
     Extended,
 }
 
+#[derive(Debug)]
 pub enum PortalBatch {
     Description(protocol::RowDescription),
     Rows(BatchWriter),
@@ -608,7 +607,8 @@ mod tests {
         },
         prelude::SessionContext,
     };
-    use futures_util::stream::StreamExt;
+    use futures::StreamExt;
+    use std::pin::pin;
     use std::sync::Arc;
 
     fn generate_testing_data_frame(cnt: usize) -> DataFrame {
@@ -709,7 +709,7 @@ mod tests {
 
         let mut portal = Pin::new(&mut p);
         let stream = portal.execute(10);
-        pin_mut!(stream);
+        let mut stream = pin!(stream);
 
         let response = stream.next().await.unwrap()?;
         match response {
@@ -742,7 +742,7 @@ mod tests {
 
         let mut portal = Pin::new(&mut p);
         let stream = portal.execute(1);
-        pin_mut!(stream);
+        let mut stream = pin!(stream);
 
         let response = stream.next().await.unwrap();
         match response {
@@ -770,7 +770,7 @@ mod tests {
 
         let mut portal = Pin::new(&mut p);
         let stream = portal.execute(0);
-        pin_mut!(stream);
+        let mut stream = pin!(stream);
 
         let response = stream.next().await.unwrap()?;
         match response {
@@ -850,7 +850,7 @@ mod tests {
     ) -> Result<(), ConnectionError> {
         let mut p = Pin::new(portal);
         let stream = p.execute(max_rows);
-        pin_mut!(stream);
+        let mut stream = pin!(stream);
 
         match stream.next().await.unwrap()? {
             PortalBatch::Description(_) => (),
@@ -877,7 +877,7 @@ mod tests {
     ) -> Result<(), ConnectionError> {
         let mut p = Pin::new(portal);
         let stream = p.execute(max_rows);
-        pin_mut!(stream);
+        let mut stream = pin!(stream);
 
         let mut total_rows = 0;
         while let Some(batch) = stream.next().await {

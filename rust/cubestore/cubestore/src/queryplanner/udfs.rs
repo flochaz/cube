@@ -1,5 +1,7 @@
+use super::udf_xirr::XirrAccumulator;
 use crate::queryplanner::coalesce::{coalesce, SUPPORTED_COALESCE_TYPES};
 use crate::queryplanner::hll::{Hll, HllUnion};
+use crate::queryplanner::udf_xirr::create_xirr_udaf;
 use crate::CubeError;
 use chrono::{Datelike, Duration, Months, NaiveDateTime, TimeZone, Utc};
 use datafusion::arrow::array::{
@@ -17,6 +19,7 @@ use serde_derive::{Deserialize, Serialize};
 use smallvec::smallvec;
 use smallvec::SmallVec;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub enum CubeScalarUDFKind {
@@ -76,6 +79,7 @@ pub fn scalar_kind_by_name(n: &str) -> Option<CubeScalarUDFKind> {
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub enum CubeAggregateUDFKind {
     MergeHll, // merge(), accepting the HyperLogLog sketches.
+    Xirr,
 }
 
 pub trait CubeAggregateUDF {
@@ -88,6 +92,7 @@ pub trait CubeAggregateUDF {
 pub fn aggregate_udf_by_kind(k: CubeAggregateUDFKind) -> Box<dyn CubeAggregateUDF> {
     match k {
         CubeAggregateUDFKind::MergeHll => Box::new(HllMergeUDF {}),
+        CubeAggregateUDFKind::Xirr => Box::new(XirrUDF {}),
     }
 }
 
@@ -95,6 +100,9 @@ pub fn aggregate_udf_by_kind(k: CubeAggregateUDFKind) -> Box<dyn CubeAggregateUD
 pub fn aggregate_kind_by_name(n: &str) -> Option<CubeAggregateUDFKind> {
     if n == "MERGE" {
         return Some(CubeAggregateUDFKind::MergeHll);
+    }
+    if n == "XIRR" {
+        return Some(CubeAggregateUDFKind::Xirr);
     }
     return None;
 }
@@ -151,7 +159,7 @@ impl CubeScalarUDF for Now {
     }
 
     fn descriptor(&self) -> ScalarUDF {
-        return ScalarUDF {
+        ScalarUDF {
             name: self.name().to_string(),
             signature: Self::signature(),
             return_type: Arc::new(|inputs| {
@@ -159,11 +167,31 @@ impl CubeScalarUDF for Now {
                 Ok(Arc::new(DataType::Timestamp(TimeUnit::Nanosecond, None)))
             }),
             fun: Arc::new(|_| {
-                Err(DataFusionError::Internal(
-                    "NOW() was not optimized away".to_string(),
-                ))
+                let t = match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        return Err(DataFusionError::Internal(format!(
+                            "Failed to get current timestamp: {}",
+                            e
+                        )))
+                    }
+                };
+
+                let nanos = match i64::try_from(t.as_nanos()) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        return Err(DataFusionError::Internal(format!(
+                            "Failed to convert timestamp to i64: {}",
+                            e
+                        )))
+                    }
+                };
+
+                Ok(ColumnarValue::Scalar(ScalarValue::TimestampNanosecond(
+                    Some(nanos),
+                )))
             }),
-        };
+        }
     }
 }
 
@@ -183,7 +211,7 @@ impl CubeScalarUDF for UnixTimestamp {
     }
 
     fn descriptor(&self) -> ScalarUDF {
-        return ScalarUDF {
+        ScalarUDF {
             name: self.name().to_string(),
             signature: Self::signature(),
             return_type: Arc::new(|inputs| {
@@ -191,11 +219,29 @@ impl CubeScalarUDF for UnixTimestamp {
                 Ok(Arc::new(DataType::Int64))
             }),
             fun: Arc::new(|_| {
-                Err(DataFusionError::Internal(
-                    "UNIX_TIMESTAMP() was not optimized away".to_string(),
-                ))
+                let t = match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        return Err(DataFusionError::Internal(format!(
+                            "Failed to get current timestamp: {}",
+                            e
+                        )))
+                    }
+                };
+
+                let seconds = match i64::try_from(t.as_secs()) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        return Err(DataFusionError::Internal(format!(
+                            "Failed to convert timestamp to i64: {}",
+                            e
+                        )))
+                    }
+                };
+
+                Ok(ColumnarValue::Scalar(ScalarValue::Int64(Some(seconds))))
             }),
-        };
+        }
     }
 }
 
@@ -580,6 +626,22 @@ impl CubeAggregateUDF for HllMergeUDF {
     }
     fn accumulator(&self) -> Box<dyn Accumulator> {
         return Box::new(HllMergeAccumulator { acc: None });
+    }
+}
+
+struct XirrUDF {}
+impl CubeAggregateUDF for XirrUDF {
+    fn kind(&self) -> CubeAggregateUDFKind {
+        CubeAggregateUDFKind::Xirr
+    }
+    fn name(&self) -> &str {
+        "XIRR"
+    }
+    fn descriptor(&self) -> AggregateUDF {
+        create_xirr_udaf()
+    }
+    fn accumulator(&self) -> Box<dyn Accumulator> {
+        return Box::new(XirrAccumulator::new());
     }
 }
 

@@ -10,7 +10,7 @@ import {
   Sql4SqlResponse,
 } from '@cubejs-backend/native';
 import type { ShutdownMode } from '@cubejs-backend/native';
-import { displayCLIWarning, getEnv } from '@cubejs-backend/shared';
+import { displayCLIWarning, getEnv, CacheMode } from '@cubejs-backend/shared';
 
 import * as crypto from 'crypto';
 import type { ApiGateway } from './gateway';
@@ -29,6 +29,11 @@ export type SQLServerOptions = {
 
 export type SQLServerConstructorOptions = {
   gatewayPort?: number,
+};
+
+export type SqlAuthServiceAuthenticateRequest = {
+  protocol: string;
+  method: string;
 };
 
 export class SQLServer {
@@ -60,8 +65,8 @@ export class SQLServer {
     throw new Error('Native api gateway is not enabled');
   }
 
-  public async execSql(sqlQuery: string, stream: any, securityContext?: any) {
-    await execSql(this.sqlInterfaceInstance!, sqlQuery, stream, securityContext);
+  public async execSql(sqlQuery: string, stream: any, securityContext?: any, cacheMode?: CacheMode) {
+    await execSql(this.sqlInterfaceInstance!, sqlQuery, stream, securityContext, cacheMode);
   }
 
   public async sql4sql(sqlQuery: string, disablePostProcessing: boolean, securityContext?: unknown): Promise<Sql4SqlResponse> {
@@ -88,10 +93,14 @@ export class SQLServer {
       let { securityContext } = session;
 
       if (request.meta.changeUser && request.meta.changeUser !== session.user) {
+        const sqlAuthRequest: SqlAuthServiceAuthenticateRequest = {
+          protocol: request.meta.protocol,
+          method: 'password',
+        };
         const canSwitch = session.superuser || await canSwitchSqlUser(session.user, request.meta.changeUser);
         if (canSwitch) {
           userForContext = request.meta.changeUser;
-          const current = await checkSqlAuth(request, userForContext, null);
+          const current = await checkSqlAuth({ ...request, ...sqlAuthRequest }, userForContext, null);
           securityContext = current.securityContext;
         } else {
           throw new Error(
@@ -119,14 +128,25 @@ export class SQLServer {
         };
       },
       checkSqlAuth: async ({ request, user, password }) => {
-        const { password: returnedPassword, superuser, securityContext, skipPasswordCheck } = await checkSqlAuth(request, user, password);
+        try {
+          const { password: returnedPassword, superuser, securityContext, skipPasswordCheck } = await checkSqlAuth(request, user, password);
 
-        return {
-          password: returnedPassword,
-          superuser: superuser || false,
-          securityContext,
-          skipPasswordCheck,
-        };
+          return {
+            password: returnedPassword,
+            superuser: superuser || false,
+            securityContext,
+            skipPasswordCheck,
+          };
+        } catch (e) {
+          this.apiGateway.log({
+            type: 'Auth Error',
+            protocol: (request as any).protocol,
+            method: (request as any).method,
+            apiType: 'sql',
+            error: (e as Error).stack || (e as Error).toString(),
+          });
+          throw e;
+        }
       },
       meta: async ({ request, session, onlyCompilerId }) => {
         const context = await this.apiGateway.contextByReq(<any> request, session.securityContext, request.id);
@@ -187,7 +207,7 @@ export class SQLServer {
           }
         });
       },
-      sqlApiLoad: async ({ request, session, query, queryKey, sqlQuery, streaming }) => {
+      sqlApiLoad: async ({ request, session, query, queryKey, sqlQuery, streaming, cacheMode }) => {
         const context = await contextByRequest(request, session);
 
         // eslint-disable-next-line no-async-promise-executor
@@ -198,6 +218,7 @@ export class SQLServer {
               query,
               sqlQuery,
               streaming,
+              cacheMode,
               context,
               memberExpressions: true,
               res: (response) => {

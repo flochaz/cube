@@ -71,7 +71,7 @@ export class OrchestratorApi {
    * error otherwise.
    */
   public async executeQuery(query: QueryBody) {
-    const queryForLog = query.query && query.query.replace(/\s+/g, ' ');
+    const queryForLog = query.query?.replace(/\s+/g, ' ');
     const startQueryTime = (new Date()).getTime();
 
     try {
@@ -81,7 +81,7 @@ export class OrchestratorApi {
         requestId: query.requestId
       });
 
-      let fetchQueryPromise = query.loadRefreshKeysOnly
+      let fetchQueryPromise: Promise<any> = query.loadRefreshKeysOnly
         ? this.orchestrator.loadRefreshKeys(query)
         : this.orchestrator.fetchQuery(query);
 
@@ -120,7 +120,7 @@ export class OrchestratorApi {
 
       return data;
     } catch (err) {
-      if ((err instanceof pt.TimeoutError || err instanceof ContinueWaitError)) {
+      if (err instanceof pt.TimeoutError || err instanceof ContinueWaitError) {
         this.logger('Continue wait', {
           duration: ((new Date()).getTime() - startQueryTime),
           query: queryForLog,
@@ -128,14 +128,18 @@ export class OrchestratorApi {
           requestId: query.requestId
         });
 
+        if (query.scheduledRefresh) {
+          throw {
+            error: 'Continue wait',
+            stage: null
+          };
+        }
+
         const fromCache = await this
           .orchestrator
           .resultFromCacheIfExists(query);
-        if (
-          !query.renewQuery &&
-          fromCache &&
-          !query.scheduledRefresh
-        ) {
+
+        if ((query.cacheMode === 'stale-if-slow' || query.cacheMode === 'stale-while-revalidate') && fromCache) {
           this.logger('Slow Query Warning', {
             query: queryForLog,
             requestId: query.requestId,
@@ -152,9 +156,7 @@ export class OrchestratorApi {
 
         throw {
           error: 'Continue wait',
-          stage: !query.scheduledRefresh
-            ? await this.orchestrator.queryStage(query)
-            : null
+          stage: await this.orchestrator.queryStage(query)
         };
       }
 
@@ -174,14 +176,12 @@ export class OrchestratorApi {
   }
 
   /**
-   * Tests worker's connections to the Cubstore and, if not in the rollup only
+   * Tests worker's connections to the Cubestore and, if not in the rollup only
    * mode, to the datasources.
    */
   public async testConnection() {
     if (this.options.rollupOnlyMode) {
-      return Promise.all([
-        this.testDriverConnection(this.options.externalDriverFactory, DriverType.External),
-      ]);
+      return this.testDriverConnection(this.options.externalDriverFactory, DriverType.External);
     } else {
       return Promise.all([
         ...Object.keys(this.seenDataSources).map(
@@ -260,7 +260,7 @@ export class OrchestratorApi {
     this.seenDataSources[dataSource] = true;
   }
 
-  public getPreAggregationVersionEntries(context: RequestContext, preAggregations, preAggregationsSchema) {
+  public getPreAggregationVersionEntries(context: RequestContext, preAggregations, preAggregationsSchema): Promise<any> {
     return this.orchestrator.getPreAggregationVersionEntries(
       preAggregations,
       preAggregationsSchema,
@@ -295,14 +295,6 @@ export class OrchestratorApi {
 
   public async cancelPreAggregationQueriesFromQueue(queryKeys: string[], dataSource: string) {
     return this.orchestrator.cancelPreAggregationQueriesFromQueue(queryKeys, dataSource);
-  }
-
-  public async subscribeQueueEvents(id, callback) {
-    return this.orchestrator.subscribeQueueEvents(id, callback);
-  }
-
-  public async unSubscribeQueueEvents(id) {
-    return this.orchestrator.unSubscribeQueueEvents(id);
   }
 
   public async updateRefreshEndReached() {

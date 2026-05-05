@@ -54,6 +54,7 @@ import {
   PrimaryKeysQueryResult,
   ForeignKeysQueryResult,
   DatabaseStructure,
+  InformationSchemaColumn,
 } from './driver.interface';
 
 /**
@@ -93,6 +94,21 @@ export type AzureStorageClientConfig = {
 
 export type GoogleStorageClientConfig = {
   credentials: any,
+};
+
+export type ParsedBucketUrl = {
+  /**
+   * may be 's3', 'wasbs', 'gs', 'azure', etc
+   */
+  schema?: string;
+  bucketName: string;
+  /**
+   * prefix/path without leading and trailing / or empty string if not presented
+   */
+  path: string;
+  username?: string;
+  password?: string;
+  original: string;
 };
 
 const sortByKeys = (unordered: any) => {
@@ -375,9 +391,9 @@ export abstract class BaseDriver implements DriverInterface {
     return undefined;
   }
 
-  abstract testConnection(): Promise<void>;
+  public abstract testConnection(): Promise<void>;
 
-  abstract query<R = unknown>(_query: string, _values?: unknown[], _options?: QueryOptions): Promise<R[]>;
+  public abstract query<R = unknown>(_query: string, _values?: unknown[], _options?: QueryOptions): Promise<R[]>;
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   public async streamQuery(sql: string, values: string[]): Promise<stream.Readable> {
@@ -408,32 +424,47 @@ export abstract class BaseDriver implements DriverInterface {
     };
   }
 
-  public readOnly() {
+  public readOnly(): boolean {
     return false;
   }
 
-  protected informationColumnsSchemaReducer(result: any, i: any): DatabaseStructure {
-    let schema = (result[i.table_schema] || {});
-    const columns = (schema[i.table_name] || []);
+  protected informationColumnsSchemaReducer(result: DatabaseStructure, i: InformationSchemaColumn): DatabaseStructure {
+    if (!result[i.table_schema]) {
+      result[i.table_schema] = {};
+    }
 
-    columns.push({
+    if (!result[i.table_schema][i.table_name]) {
+      result[i.table_schema][i.table_name] = [];
+    }
+
+    result[i.table_schema][i.table_name].push({
       name: i.column_name,
       type: i.data_type,
       attributes: i.key_type ? ['primaryKey'] : []
     });
 
-    columns.sort();
-    schema[i.table_name] = columns;
-    schema = sortByKeys(schema);
-    result[i.table_schema] = schema;
-
-    return sortByKeys(result);
+    return result;
   }
 
-  public tablesSchema(): Promise<DatabaseStructure> {
-    const query = this.informationSchemaQuery();
+  protected informationColumnsSchemaSorter(data: InformationSchemaColumn[]) {
+    return data
+      .map((i) => ({
+        ...i,
+        sortedKeyServiceField: `${i.table_schema}.${i.table_name}.${i.column_name}`,
+      }))
+      .sort((a, b) => a.sortedKeyServiceField.localeCompare(b.sortedKeyServiceField));
+  }
 
-    return this.query(query, []).then(data => data.reduce<DatabaseStructure>(this.informationColumnsSchemaReducer, {}));
+  public async tablesSchema(): Promise<DatabaseStructure> {
+    const query = this.informationSchemaQuery();
+    const data: InformationSchemaColumn[] = await this.query(query, []);
+
+    if (!data.length) {
+      return {};
+    }
+
+    const sortedData = this.informationColumnsSchemaSorter(data);
+    return sortedData.reduce<DatabaseStructure>(this.informationColumnsSchemaReducer, {});
   }
 
   // Extended version of tablesSchema containing primary and foreign keys
@@ -696,6 +727,44 @@ export abstract class BaseDriver implements DriverInterface {
   }
 
   /**
+   * Returns parsed bucket structure.
+   * Supported variants:
+   *   s3://my-bucket-name/prefix/longer/
+   *   s3://my-bucket-name
+   *   my-bucket-name/some-path
+   *   my-bucket-name
+   *   wasbs://real-container-name@account.blob.core.windows.net
+   */
+  protected parseBucketUrl(input: string | null | undefined): ParsedBucketUrl {
+    const original = input?.trim() || '';
+
+    if (!original) {
+      return {
+        bucketName: '',
+        path: '',
+        original,
+      };
+    }
+
+    const hasSchema = /^[a-zA-Z][a-zA-Z0-9+\-.]*:\/\//.test(original);
+    const normalized = hasSchema ? original : `schema://${original}`;
+
+    const url = new URL(normalized);
+
+    const path = url.pathname.replace(/^\/+|\/+$/g, '');
+    const schema = url.protocol.replace(/:$/, '');
+
+    return {
+      schema: schema || undefined,
+      bucketName: url.hostname,
+      path,
+      username: url.username || undefined,
+      password: url.password || undefined,
+      original,
+    };
+  }
+
+  /**
    * Returns an array of signed AWS S3 URLs of the unloaded csv files.
    */
   protected async extractUnloadedFilesFromS3(
@@ -717,7 +786,7 @@ export abstract class BaseDriver implements DriverInterface {
       if (!list.Contents) {
         return [];
       } else {
-        const csvFile = await Promise.all(
+        const csvFiles = await Promise.all(
           list.Contents.map(async (file) => {
             const command = new GetObjectCommand({
               Bucket: bucketName,
@@ -726,7 +795,7 @@ export abstract class BaseDriver implements DriverInterface {
             return getSignedUrl(storage, command, { expiresIn: 3600 });
           })
         );
-        return csvFile;
+        return csvFiles;
       }
     }
 
@@ -741,23 +810,25 @@ export abstract class BaseDriver implements DriverInterface {
     bucketName: string,
     tableName: string
   ): Promise<string[]> {
-    const storage = new Storage({
-      credentials: gcsConfig.credentials,
-      projectId: gcsConfig.credentials.project_id
-    });
+    const storage = new Storage(
+      gcsConfig.credentials
+        ? { credentials: gcsConfig.credentials, projectId: gcsConfig.credentials.project_id }
+        : undefined
+    );
     const bucket = storage.bucket(bucketName);
     const [files] = await bucket.getFiles({ prefix: `${tableName}/` });
     if (files.length) {
-      const csvFile = await Promise.all(files.map(async (file) => {
+      const csvFiles = await Promise.all(files.map(async (file) => {
         const [url] = await file.getSignedUrl({
           action: 'read',
           expires: new Date(new Date().getTime() + 60 * 60 * 1000)
         });
         return url;
       }));
-      return csvFile;
+
+      return csvFiles;
     } else {
-      return [];
+      throw new Error('No CSV files were obtained from the bucket');
     }
   }
 
@@ -851,6 +922,10 @@ export abstract class BaseDriver implements DriverInterface {
         const sas = await getSas(blob.name, starts, expires);
         csvFiles.push(`${url}/${container}/${blob.name}?${sas}`);
       }
+    }
+
+    if (csvFiles.length === 0) {
+      throw new Error('No CSV files were obtained from the bucket');
     }
 
     return csvFiles;

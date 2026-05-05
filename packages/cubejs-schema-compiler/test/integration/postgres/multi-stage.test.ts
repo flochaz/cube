@@ -1,7 +1,6 @@
 import {
   getEnv,
 } from '@cubejs-backend/shared';
-import { PostgresQuery } from '../../../src/adapter/PostgresQuery';
 import { prepareYamlCompiler } from '../../unit/PrepareCompiler';
 import { dbRunner } from './PostgresDBRunner';
 
@@ -189,38 +188,52 @@ views:
 
     `);
 
-  async function runQueryTest(q, expectedResult) {
-    if (!getEnv('nativeSqlPlanner')) {
-      return;
-    }
-    await compiler.compile();
-    const query = new PostgresQuery({ joinGraph, cubeEvaluator, compiler }, q);
-
-    console.log(query.buildSqlAndParams());
-
-    const res = await dbRunner.testQuery(query.buildSqlAndParams());
-    console.log(JSON.stringify(res));
-
-    expect(res).toEqual(
-      expectedResult
-    );
-  }
-
-  it('multi stage over sub query', async () => runQueryTest({
-    measures: ['orders.revenue', 'orders.revenue_1_y_ago', 'orders.cagr_1_y'],
-    timeDimensions: [
+  if (getEnv('nativeSqlPlanner')) {
+    it('multi stage over sub query', async () => dbRunner.runQueryTest({
+      measures: ['orders.revenue', 'orders.revenue_1_y_ago', 'orders.cagr_1_y'],
+      timeDimensions: [
+        {
+          dimension: 'orders.date',
+          granularity: 'year'
+        }
+      ],
+      timezone: 'UTC'
+    }, [
       {
-        dimension: 'orders.date',
-        granularity: 'year'
-      }
-    ],
-    timezone: 'UTC'
-  }, [
+        orders__cagr_1_y: null,
+        orders__date_year: '2022-01-01T00:00:00.000Z',
+        orders__revenue: '5',
+        orders__revenue_1_y_ago: null,
+      },
+      {
+        orders__date_year: '2023-01-01T00:00:00.000Z',
+        orders__revenue: '15',
+        orders__revenue_1_y_ago: '5',
+        orders__cagr_1_y: '2.0000000000000000'
+      },
+      {
+        orders__date_year: '2024-01-01T00:00:00.000Z',
+        orders__revenue: '30',
+        orders__revenue_1_y_ago: '15',
+        orders__cagr_1_y: '1.0000000000000000'
+      },
+      {
+        orders__date_year: '2025-01-01T00:00:00.000Z',
+        orders__revenue: '5',
+        orders__revenue_1_y_ago: '30',
+        orders__cagr_1_y: '-0.83333333333333333333'
+      },
 
-    { orders__date_year: '2023-01-01T00:00:00.000Z',
-      orders__revenue: '15',
-      orders__revenue_1_y_ago: '5',
-      orders__cagr_1_y: '2.0000000000000000' },
-    { orders__date_year: '2024-01-01T00:00:00.000Z', orders__revenue: '30', orders__revenue_1_y_ago: '15', orders__cagr_1_y: '1.0000000000000000' },
-    { orders__date_year: '2025-01-01T00:00:00.000Z', orders__revenue: '5', orders__revenue_1_y_ago: '30', orders__cagr_1_y: '-0.83333333333333333333' }]));
+      {
+        orders__cagr_1_y: null,
+        orders__date_year: '2026-01-01T00:00:00.000Z',
+        orders__revenue: null,
+        orders__revenue_1_y_ago: '5',
+      },
+    ],
+    { joinGraph, cubeEvaluator, compiler }));
+  } else {
+    // This test is working only in tesseract
+    test.skip('multi stage over sub query', () => { expect(1).toBe(1); });
+  }
 });

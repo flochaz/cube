@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { Writable } from 'stream';
 import type { Request as ExpressRequest } from 'express';
+import { CacheMode } from '@cubejs-backend/shared';
 import { ResultWrapper } from './ResultWrapper';
 
 export * from './ResultWrapper';
@@ -77,12 +78,13 @@ export interface SqlPayload {
 }
 
 export interface SqlApiLoadPayload {
-  request: Request<LoadRequestMeta>,
-  session: SessionContext,
-  query: any,
-  queryKey: any,
-  sqlQuery: any,
-  streaming: boolean,
+  request: Request<LoadRequestMeta>;
+  session: SessionContext;
+  query: any;
+  queryKey: any;
+  sqlQuery: any;
+  streaming: boolean;
+  cacheMode: CacheMode;
 }
 
 export interface LogLoadEventPayload {
@@ -122,12 +124,14 @@ export type SQLInterfaceOptions = {
 
 export interface TransformConfig {
   fileName: string;
+  fileContent: string;
   transpilers: string[];
   compilerId: string;
   metaData?: {
     cubeNames: string[];
     cubeSymbols: Record<string, Record<string, boolean>>;
     contextSymbols: Record<string, string>;
+    stage: 0 | 1 | 2 | 3;
   }
 }
 
@@ -433,10 +437,10 @@ export const shutdownInterface = async (instance: SqlInterfaceInstance, shutdown
   await native.shutdownInterface(instance, shutdownMode);
 };
 
-export const execSql = async (instance: SqlInterfaceInstance, sqlQuery: string, stream: any, securityContext?: any): Promise<void> => {
+export const execSql = async (instance: SqlInterfaceInstance, sqlQuery: string, stream: any, securityContext?: any, cacheMode: CacheMode = 'stale-if-slow'): Promise<void> => {
   const native = loadNative();
 
-  await native.execSql(instance, sqlQuery, stream, securityContext ? JSON.stringify(securityContext) : null);
+  await native.execSql(instance, sqlQuery, stream, securityContext ? JSON.stringify(securityContext) : null, cacheMode);
 };
 
 // TODO parse result from native code
@@ -446,9 +450,8 @@ export const sql4sql = async (instance: SqlInterfaceInstance, sqlQuery: string, 
   return native.sql4sql(instance, sqlQuery, disablePostProcessing, securityContext ? JSON.stringify(securityContext) : null);
 };
 
-export const buildSqlAndParams = (cubeEvaluator: any): String => {
+export const buildSqlAndParams = (cubeEvaluator: any): any[] => {
   const native = loadNative();
-
   return native.buildSqlAndParams(cubeEvaluator);
 };
 
@@ -495,14 +498,24 @@ export const getFinalQueryResultMulti = (transformDataArr: Object[], rows: any[]
   return native.getFinalQueryResultMulti(transformDataArr, rows, responseData);
 };
 
-export const transpileJs = async (content: String, metadata: TransformConfig): Promise<TransformResponse> => {
+export const transpileJs = async (transpileRequests: TransformConfig[]): Promise<TransformResponse[]> => {
   const native = loadNative();
 
   if (native.transpileJs) {
-    return native.transpileJs(content, metadata);
+    return native.transpileJs(transpileRequests);
   }
 
   throw new Error('TranspileJs native implementation not found!');
+};
+
+export const transpileYaml = async (transpileRequests: TransformConfig[]): Promise<TransformResponse[]> => {
+  const native = loadNative();
+
+  if (native.transpileYaml) {
+    return native.transpileYaml(transpileRequests);
+  }
+
+  throw new Error('TranspileYaml native implementation not found!');
 };
 
 export interface PyConfiguration {
@@ -515,6 +528,7 @@ export interface PyConfiguration {
   scheduledRefreshContexts?: (ctx: unknown) => Promise<string[]>
   scheduledRefreshTimeZones?: (ctx: unknown) => Promise<string[]>
   contextToRoles?: (ctx: unknown) => Promise<string[]>
+  contextToGroups?: (ctx: unknown) => Promise<string[]>
 }
 
 function simplifyExpressRequest(req: ExpressRequest) {

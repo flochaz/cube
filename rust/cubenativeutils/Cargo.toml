@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-cubesql = { path = "../cubesql/cubesql" }
+thiserror = "2"
 tokio = { version = "1", features = ["full", "rt"] }
 async-channel = { version = "2" }
 async-trait = "0.1.36"
@@ -23,3 +23,16 @@ convert_case = "0.6.0"
 version = "=1"
 default-features = false
 features = ["napi-1", "napi-4", "napi-6", "futures"]
+
+# Code in cubenativeutils crate is not ready for full-blown clippy
+# So we disable some rules to enable per-rule latch in CI, not for a whole clippy run
+# Feel free to remove any rule from here and fix all warnings with it
+# Or to write a comment why rule should stay disabled
+[lints.clippy]
+clone_on_copy = "allow"
+len_without_is_empty = "allow"
+module_inception = "allow"
+multiple_bound_locations = "allow"
+result_large_err = "allow"
+unnecessary_cast = "allow"
+useless_format = "allow"

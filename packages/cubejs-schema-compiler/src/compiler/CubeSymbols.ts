@@ -5,36 +5,206 @@ import { camelize } from 'inflection';
 import { UserError } from './UserError';
 import { DynamicReference } from './DynamicReference';
 import { camelizeCube } from './utils';
-import { BaseQuery } from '../adapter';
 
 import type { ErrorReporter } from './ErrorReporter';
+import { TranspilerSymbolResolver } from './transpilers';
 
-interface CubeDefinition {
+export type ToString = { toString(): string };
+
+export type GranularityDefinition = {
+  sql?: (...args: any[]) => string;
+  title?: string;
+  interval?: string;
+  offset?: string;
+  origin?: string;
+};
+
+export type TimeshiftDefinition = {
+  interval?: string;
+  type?: string;
+  name?: string;
+  timeDimension?: (...args: any[]) => string;
+};
+
+export type CubeSymbolDefinition = {
+  type?: string;
+  sql?: (...args: any[]) => string;
+  primaryKey?: boolean;
+  granularities?: Record<string, GranularityDefinition>;
+  timeShift?: TimeshiftDefinition[];
+  format?: string;
+};
+
+export type HierarchyDefinition = {
+  title?: string;
+  public?: boolean;
+  levels?: (...args: any[]) => string[];
+};
+
+export type EveryInterval = string;
+type EveryCronInterval = string;
+type EveryCronTimeZone = string;
+
+export type CubeRefreshKeySqlVariant = {
+  sql: () => string;
+  every?: EveryInterval;
+};
+
+export type CubeRefreshKeyEveryVariant = {
+  every: EveryInterval | EveryCronInterval;
+  timezone?: EveryCronTimeZone;
+  incremental?: boolean;
+  updateWindow?: EveryInterval;
+};
+
+export type CubeRefreshKeyImmutableVariant = {
+  immutable: true;
+};
+
+export type CubeRefreshKey =
+  | CubeRefreshKeySqlVariant
+  | CubeRefreshKeyEveryVariant
+  | CubeRefreshKeyImmutableVariant;
+
+type BasePreAggregationDefinition = {
+  allowNonStrictDateRangeMatch?: boolean;
+  useOriginalSqlPreAggregations?: boolean;
+  timeDimensionReference?: (...args: any[]) => ToString;
+  indexes?: Record<string, any>;
+  refreshKey?: CubeRefreshKey;
+  ownedByCube?: boolean;
+};
+
+export type PreAggregationDefinitionOriginalSql = BasePreAggregationDefinition & {
+  type: 'originalSql';
+  partitionGranularity?: string;
+  // eslint-disable-next-line camelcase
+  partition_granularity?: string;
+  // eslint-disable-next-line camelcase
+  time_dimension?: (...args: any[]) => ToString;
+};
+
+export type PreAggregationDefinitionRollup = BasePreAggregationDefinition & {
+  type: 'autoRollup' | 'rollupJoin' | 'rollupLambda' | 'rollup';
+  granularity: string;
+  timeDimensionReferences: Array<{ dimension: () => ToString; granularity: string }>;
+  dimensionReferences: (...args: any[]) => ToString[];
+  segmentReferences: (...args: any[]) => ToString[];
+  measureReferences: (...args: any[]) => ToString[];
+  rollupReferences: (...args: any[]) => ToString[];
+  scheduledRefresh: boolean;
+  external: boolean;
+};
+
+// PreAggregationDefinition is widely used in the codebase, but it's assumed to be rollup,
+// originalSql is not refreshed and so on.
+export type PreAggregationDefinition = PreAggregationDefinitionRollup;
+
+export type JoinDefinition = {
+  name: string,
+  relationship: string,
+  sql: (...args: any[]) => string,
+};
+
+export type Filter =
+  | {
+      member: string;
+      memberReference?: string;
+      [key: string]: any;
+    }
+  | {
+      and?: Filter[];
+      or?: Filter[];
+      [key: string]: any;
+    };
+
+export type AccessPolicyDefinition = {
+  role?: string;
+  group?: string;
+  groups?: string[];
+  rowLevel?: {
+    filters: Filter[];
+  };
+  memberLevel?: {
+    includes?: string | string[];
+    excludes?: string | string[];
+    includesMembers?: string[];
+    excludesMembers?: string[];
+  };
+};
+
+export type ViewIncludedMember = {
+  type: string;
+  memberPath: string;
   name: string;
-  extends?: string;
-  measures?: Record<string, any>;
-  dimensions?: Record<string, any>;
-  segments?: Record<string, any>;
-  hierarchies?: Record<string, any>;
-  preAggregations?: Record<string, any>;
-  joins?: Record<string, any>;
-  accessPolicy?: Record<string, any>;
+};
+
+export interface CubeDefinition {
+  name: string;
+  extends?: (...args: Array<unknown>) => { __cubeName: string };
+  sql?: string | ((...args: any[]) => string);
+  // eslint-disable-next-line camelcase
+  sql_table?: string | ((...args: any[]) => string);
+  sqlTable?: string | ((...args: any[]) => string);
+  dataSource?: string;
+  measures?: Record<string, CubeSymbolDefinition>;
+  dimensions?: Record<string, CubeSymbolDefinition>;
+  segments?: Record<string, CubeSymbolDefinition>;
+  hierarchies?: Record<string, HierarchyDefinition>;
+  preAggregations?: Record<string, PreAggregationDefinitionRollup | PreAggregationDefinitionOriginalSql>;
+  // eslint-disable-next-line camelcase
+  pre_aggregations?: Record<string, PreAggregationDefinitionRollup | PreAggregationDefinitionOriginalSql>;
+  joins?: JoinDefinition[];
+  accessPolicy?: AccessPolicyDefinition[];
+  // eslint-disable-next-line camelcase
+  access_policy?: any[];
+  folders?: any[];
   includes?: any;
   excludes?: any;
   cubes?: any;
   isView?: boolean;
+  calendar?: boolean;
   isSplitView?: boolean;
-  includedMembers?: any[];
+  includedMembers?: ViewIncludedMember[];
+  joinMap?: string[][];
+  fileName?: string;
+}
+
+export interface CubeDefinitionExtended extends CubeDefinition {
+  allDefinitions: (type: string) => Record<string, any>;
+  rawFolders: () => any[];
+  rawCubes: () => any[];
 }
 
 interface SplitViews {
   [key: string]: any;
 }
 
+export interface CubeSymbolsBase {
+  cubeName: () => string;
+  cubeObj: () => CubeDefinitionExtended;
+}
+
+export type CubeSymbolsDefinition = CubeSymbolsBase & Record<string, CubeSymbolDefinition>;
+
+type MemberSets = {
+  resolvedMembers: Set<string>;
+  allMembers: Set<string>;
+};
+
+type ViewResolvedMember = {
+  member: string;
+  name: string;
+};
+
+type ViewExcludedMember = {
+  member: string;
+};
+
 const FunctionRegex = /function\s+\w+\(([A-Za-z0-9_,]*)|\(([\s\S]*?)\)\s*=>|\(?(\w+)\)?\s*=>/;
 export const CONTEXT_SYMBOLS = {
   SECURITY_CONTEXT: 'securityContext',
-  // SECURITY_CONTEXT has been deprecated, however security_context (lowecase)
+  // SECURITY_CONTEXT has been deprecated, however security_context (lowercase)
   // is allowed in RBAC policies for query-time attribute matching
   security_context: 'securityContext',
   securityContext: 'securityContext',
@@ -45,18 +215,18 @@ export const CONTEXT_SYMBOLS = {
 
 export const CURRENT_CUBE_CONSTANTS = ['CUBE', 'TABLE'];
 
-export class CubeSymbols {
-  public symbols: Record<string | symbol, any>;
+export class CubeSymbols implements TranspilerSymbolResolver {
+  public symbols: Record<string | symbol, CubeSymbolsDefinition>;
 
-  private builtCubes: Record<string, any>;
+  private builtCubes: Record<string, CubeDefinitionExtended>;
 
   private cubeDefinitions: Record<string, CubeDefinition>;
 
   private funcArgumentsValues: Record<string, string[]>;
 
-  public cubeList: any[];
+  public cubeList: CubeDefinitionExtended[];
 
-  private evaluateViews: boolean;
+  private readonly evaluateViews: boolean;
 
   private resolveSymbolsCallContext: any;
 
@@ -69,14 +239,20 @@ export class CubeSymbols {
     this.evaluateViews = evaluateViews;
   }
 
+  public free() {
+    this.symbols = {};
+    this.builtCubes = {};
+    this.cubeDefinitions = {};
+    this.funcArgumentsValues = {};
+    this.cubeList = [];
+    this.resolveSymbolsCallContext = undefined;
+  }
+
   public compile(cubes: CubeDefinition[], errorReporter: ErrorReporter) {
-    // @ts-ignore
-    this.cubeDefinitions = R.pipe(
-      // @ts-ignore
-      R.map((c: CubeDefinition) => [c.name, c]),
-      R.fromPairs
-      // @ts-ignore
-    )(cubes);
+    this.cubeDefinitions = Object.fromEntries(
+      cubes.map((c): [string, CubeDefinition] => [c.name, c])
+    );
+
     this.cubeList = cubes.map(c => (c.name ? this.getCubeDefinition(c.name) : this.createCube(c)));
     // TODO support actual dependency sorting to allow using views inside views
     const sortedByDependency = R.pipe(
@@ -89,11 +265,12 @@ export class CubeSymbols {
         // TODO can we define it when cubeList is defined?
         this.cubeList.push(splitViews[viewName]);
         this.symbols[viewName] = splitViews[viewName];
+        this.cubeDefinitions[viewName] = splitViews[viewName];
       }
     }
   }
 
-  public getCubeDefinition(cubeName: string) {
+  public getCubeDefinition(cubeName: string): CubeDefinitionExtended {
     if (!this.builtCubes[cubeName]) {
       const cubeDefinition = this.cubeDefinitions[cubeName];
       this.builtCubes[cubeName] = this.createCube(cubeDefinition);
@@ -102,13 +279,18 @@ export class CubeSymbols {
     return this.builtCubes[cubeName];
   }
 
-  public createCube(cubeDefinition: CubeDefinition) {
-    let measures: any;
-    let dimensions: any;
-    let segments: any;
-    let hierarchies: any;
+  public createCube(cubeDefinition: CubeDefinition): CubeDefinitionExtended {
+    let preAggregations: CubeDefinition['preAggregations'];
+    let joins: CubeDefinition['joins'];
+    let measures: CubeDefinition['measures'];
+    let dimensions: CubeDefinition['dimensions'];
+    let segments: CubeDefinition['segments'];
+    let hierarchies: CubeDefinition['hierarchies'];
+    let accessPolicy: CubeDefinition['accessPolicy'];
+    let folders: CubeDefinition['folders'];
+    let cubes: CubeDefinition['cubes'];
 
-    const cubeObject = Object.assign({
+    const cubeObject: CubeDefinitionExtended = Object.assign({
       allDefinitions(type: string) {
         if (cubeDefinition.extends) {
           return {
@@ -119,13 +301,96 @@ export class CubeSymbols {
           return { ...cubeDefinition[type] };
         }
       },
+
+      // Folders are not a part of Cube Symbols and are constructed in the CubeEvaluator,
+      // but views can extend other views, so we need the ability to access parent's folders.
+      rawFolders() {
+        if (!folders) {
+          if (cubeDefinition.extends) {
+            folders = [
+              ...super.rawFolders(),
+              ...(cubeDefinition.folders || [])
+            ];
+          } else {
+            folders = [...(cubeDefinition.folders || [])];
+          }
+        }
+        return folders;
+      },
+
+      // `Cubes` of a view are not a part of Cube Symbols,
+      // but views can extend other views, so we need the ability to access parent view's cubes.
+      rawCubes() {
+        if (!cubes) {
+          if (cubeDefinition.extends) {
+            cubes = [
+              ...super.rawCubes(),
+              ...(cubeDefinition.cubes || [])
+            ];
+          } else {
+            cubes = [...(cubeDefinition.cubes || [])];
+          }
+        }
+        return cubes;
+      },
+
+      get preAggregations() {
+        // For preAggregations order is important, and destructing parents cube pre-aggs first will lead to
+        // unexpected results, so we can not use common approach with allDefinitions('preAggregations') here.
+        if (!preAggregations) {
+          const parentPreAggregations = cubeDefinition.extends ? super.preAggregations : null;
+          // Unfortunately, cube is not camelized yet at this point :(
+          const localPreAggregations = cubeDefinition.preAggregations || cubeDefinition.pre_aggregations;
+
+          if (parentPreAggregations) {
+            preAggregations = { ...localPreAggregations, ...parentPreAggregations, ...localPreAggregations };
+          } else {
+            preAggregations = { ...localPreAggregations };
+          }
+        }
+        return preAggregations;
+      },
+      set preAggregations(_v) {
+        // Dont allow to modify
+      },
+
+      get joins() {
+        if (!joins) {
+          // In dynamic models we still can hit the cases where joins are returned as map
+          // instead of array, so we need to convert them here to array.
+          // TODO: Simplify/Remove this when we drop map joins support totally.
+          let parentJoins = cubeDefinition.extends ? super.joins : [];
+          if (!Array.isArray(parentJoins)) {
+            parentJoins = Object.entries(parentJoins).map(([name, join]: [string, any]) => {
+              join.name = name;
+              return join as JoinDefinition;
+            });
+          }
+
+          let localJoins = cubeDefinition.joins || [];
+          // TODO: Simplify/Remove this when we drop map joins support totally.
+          if (!Array.isArray(localJoins)) {
+            localJoins = Object.entries(localJoins).map(([name, join]: [string, any]) => {
+              join.name = name;
+              return join as JoinDefinition;
+            });
+          }
+
+          joins = [...parentJoins, ...localJoins];
+        }
+        return joins;
+      },
+      set joins(_v) {
+        // Dont allow to modify
+      },
+
       get measures() {
         if (!measures) {
           measures = this.allDefinitions('measures');
         }
         return measures;
       },
-      set measures(v) {
+      set measures(_v) {
         // Dont allow to modify
       },
 
@@ -135,7 +400,7 @@ export class CubeSymbols {
         }
         return dimensions;
       },
-      set dimensions(v) {
+      set dimensions(_v) {
         // Dont allow to modify
       },
 
@@ -145,7 +410,7 @@ export class CubeSymbols {
         }
         return segments;
       },
-      set segments(v) {
+      set segments(_v) {
         // Dont allow to modify
       },
 
@@ -155,27 +420,52 @@ export class CubeSymbols {
         }
         return hierarchies;
       },
-      set hierarchies(v) {
-        //
+      set hierarchies(_v) {
+        // Dont allow to modify
+      },
+
+      get accessPolicy() {
+        if (!accessPolicy) {
+          const parentAcls = cubeDefinition.extends ? R.clone(super.accessPolicy) : [];
+          const localAccessPolicy = cubeDefinition.accessPolicy || cubeDefinition.access_policy;
+          accessPolicy = [...(parentAcls || []), ...(localAccessPolicy || [])];
+        }
+        // Schema validator expects accessPolicy to be not empty if defined
+        if (accessPolicy.length) {
+          return accessPolicy;
+        } else {
+          return undefined;
+        }
+      },
+      set accessPolicy(_v) {
+        // Dont allow to modify
       }
     },
     cubeDefinition);
 
     if (cubeDefinition.extends) {
       const superCube = this.resolveSymbolsCall(cubeDefinition.extends, (name: string) => this.cubeReferenceProxy(name));
-      Object.setPrototypeOf(
-        cubeObject,
-        // eslint-disable-next-line no-underscore-dangle
-        superCube.__cubeName ? this.getCubeDefinition(superCube.__cubeName) : superCube
-      );
+      // eslint-disable-next-line no-underscore-dangle
+      const parentCube = superCube.__cubeName ? this.getCubeDefinition(superCube.__cubeName) : superCube as unknown as CubeDefinition;
+      Object.setPrototypeOf(cubeObject, parentCube);
+
+      // We have 2 different properties that are mutually exclusive: `sqlTable` & `sql`
+      // And if in extending cube one of them is defined - we need to hide the other from parent cube definition
+      // Unfortunately, cube is not camelized yet at this point :(
+      if ((cubeDefinition.sqlTable || cubeDefinition.sql_table) && parentCube.sql) {
+        cubeObject.sql = undefined;
+      } else if (cubeDefinition.sql && (parentCube.sqlTable || parentCube.sql_table)) {
+        cubeObject.sqlTable = undefined;
+      }
     }
 
     return cubeObject;
   }
 
-  protected transform(cubeName: string, errorReporter: ErrorReporter, splitViews: SplitViews) {
+  protected transform(cubeName: string, errorReporter: ErrorReporter, splitViews: SplitViews): CubeSymbolsDefinition {
     const cube = this.getCubeDefinition(cubeName);
-    const duplicateNames = R.compose(
+    // @ts-ignore
+    const duplicateNames: string[] = R.compose(
       R.map((nameToDefinitions: any) => nameToDefinitions[0]),
       R.toPairs,
       R.filter((definitionsByName: any) => definitionsByName.length > 1),
@@ -187,9 +477,7 @@ export class CubeSymbols {
       // @ts-ignore
     )([cube.measures, cube.dimensions, cube.segments, cube.preAggregations, cube.hierarchies]);
 
-    // @ts-ignore
     if (duplicateNames.length > 0) {
-      // @ts-ignore
       errorReporter.error(`${duplicateNames.join(', ')} defined more than once`);
     }
 
@@ -210,29 +498,31 @@ export class CubeSymbols {
       this.prepareIncludes(cube, errorReporter, splitViews);
     }
 
-    return Object.assign(
-      { cubeName: () => cube.name, cubeObj: () => cube },
-      cube.measures || {},
-      cube.dimensions || {},
-      cube.segments || {},
-      cube.preAggregations || {}
-    );
+    return {
+      cubeName: () => cube.name,
+      cubeObj: () => cube,
+      ...cube.measures || {},
+      ...cube.dimensions || {},
+      ...cube.segments || {},
+      ...cube.preAggregations || {}
+    } as CubeSymbolsDefinition;
   }
 
-  private camelCaseTypes(obj: Object) {
+  private camelCaseTypes(obj: Object | Array<any> | undefined) {
     if (!obj) {
       return;
     }
 
-    // eslint-disable-next-line no-restricted-syntax
-    for (const member of Object.values(obj)) {
+    const members = Array.isArray(obj) ? obj : Object.values(obj);
+
+    members.forEach(member => {
       if (member.type && member.type.indexOf('_') !== -1) {
         member.type = camelize(member.type, true);
       }
       if (member.relationship && member.relationship.indexOf('_') !== -1) {
         member.relationship = camelize(member.relationship, true);
       }
-    }
+    });
   }
 
   protected transformPreAggregations(preAggregations: Object) {
@@ -244,6 +534,12 @@ export class CubeSymbols {
         // Rollup is a default type for pre-aggregations
         if (!preAggregation.type) {
           preAggregation.type = 'rollup';
+        }
+
+        if (preAggregation.allowNonStrictDateRangeMatch === undefined &&
+          ['originalSql', 'rollupJoin', 'rollup'].includes(preAggregation.type) &&
+          (preAggregation.timeDimension || preAggregation.timeDimensions)) {
+          preAggregation.allowNonStrictDateRangeMatch = getEnv('allowNonStrictDateRangeMatching');
         }
 
         if (preAggregation.scheduledRefresh === undefined && preAggregation.type !== 'rollupJoin' && preAggregation.type !== 'rollupLambda') {
@@ -272,86 +568,104 @@ export class CubeSymbols {
     }
   }
 
-  protected prepareIncludes(cube: CubeDefinition, errorReporter: ErrorReporter, splitViews: SplitViews) {
-    if (!cube.includes && !cube.cubes) {
+  protected prepareIncludes(cube: CubeDefinitionExtended, errorReporter: ErrorReporter, splitViews: SplitViews) {
+    const includedCubes = cube.rawCubes();
+    if (!includedCubes.length) {
       return;
     }
 
-    const memberSets = {
+    const memberSets: MemberSets = {
       resolvedMembers: new Set<string>(),
       allMembers: new Set<string>(),
     };
 
     const autoIncludeMembers = new Set<string>();
     // `hierarchies` must be processed first
-    const types = ['hierarchies', 'measures', 'dimensions', 'segments'];
+    // It's also important `dimensions` to be processed BEFORE `measures`
+    // because drillMembers processing for views in generateIncludeMembers() relies on this
+    const types = ['hierarchies', 'dimensions', 'measures', 'segments'];
+
+    const joinMap: string[][] = [];
+
+    const viewAllMembers: ViewResolvedMember[] = [];
 
     for (const type of types) {
-      let cubeIncludes: any[] = [];
-      if (cube.cubes) {
-        // If the hierarchy is included all members from it should be included as well
-        // Extend `includes` with members from hierarchies that should be auto-included
-        const cubes = type === 'dimensions' ? cube.cubes.map((it) => {
-          const fullPath = this.evaluateReferences(null, it.joinPath, { collectJoinHints: true });
-          const split = fullPath.split('.');
-          const cubeRef = split[split.length - 1];
+      let cubeIncludes: ViewResolvedMember[] = [];
 
-          if (it.includes === '*') {
-            return it;
-          }
+      // If the hierarchy is included all members from it should be included as well
+      // Extend `includes` with members from hierarchies that should be auto-included
+      const cubes = type === 'dimensions' ? includedCubes.map((it) => {
+        // TODO recheck `it.joinPath` typing
+        const fullPath = this.evaluateReferences(null, it.joinPath as () => ToString, { collectJoinHints: true });
+        const split = fullPath.split('.');
+        const cubeRef = split[split.length - 1];
 
-          const currentCubeAutoIncludeMembers = Array.from(autoIncludeMembers)
-            .filter((path) => path.startsWith(`${cubeRef}.`))
-            .map((path) => path.split('.')[1])
-            .filter(memberName => !it.includes.find((include) => (include.name || include) === memberName));
+        // No need to keep a simple direct cube joins in join map
+        if (split.length > 1) {
+          joinMap.push(split);
+        }
 
-          return {
-            ...it,
-            includes: (it.includes || []).concat(currentCubeAutoIncludeMembers),
-          };
-        }) : cube.cubes;
+        if (it.includes === '*') {
+          return it;
+        }
 
-        cubeIncludes = this.membersFromCubes(cube, cubes, type, errorReporter, splitViews, memberSets) || [];
-      }
+        const currentCubeAutoIncludeMembers = Array.from(autoIncludeMembers)
+          .filter((path) => path.startsWith(`${cubeRef}.`))
+          .map((path) => path.split('.')[1])
+          .filter(memberName => !it.includes.find((include) => (include.name || include) === memberName));
 
-      // This is the deprecated approach
-      const includes = cube.includes && this.membersFromIncludeExclude(cube.includes, cube.name, type) || [];
-      const excludes = cube.excludes && this.membersFromIncludeExclude(cube.excludes, cube.name, type) || [];
+        return {
+          ...it,
+          includes: (it.includes || []).concat(currentCubeAutoIncludeMembers),
+        };
+      }) : includedCubes;
 
-      // cube includes will take precedence in case of member clash
-      const finalIncludes = this.diffByMember(
-        this.diffByMember(includes, cubeIncludes).concat(cubeIncludes),
-        excludes
-      );
+      cubeIncludes = this.membersFromCubes(cube, cubes, type, errorReporter, splitViews, memberSets) || [];
+      viewAllMembers.push(...cubeIncludes);
 
       if (type === 'hierarchies') {
-        for (const member of finalIncludes) {
+        for (const member of cubeIncludes) {
           const path = member.member.split('.');
           const cubeName = path[path.length - 2];
           const hierarchyName = path[path.length - 1];
           const hierarchy = this.getResolvedMember(type, cubeName, hierarchyName);
 
           if (hierarchy) {
-            const levels = this.evaluateReferences(cubeName, this.getResolvedMember('hierarchies', cubeName, hierarchyName).levels, { originalSorting: true });
+            // TODO recheck `this.getResolvedMember(...).levels` typing
+            const levels = this.evaluateReferences(cubeName, this.getResolvedMember('hierarchies', cubeName, hierarchyName).levels as () => Array<ToString>, { originalSorting: true });
 
             levels.forEach((level) => autoIncludeMembers.add(level));
           }
         }
       }
 
-      const includeMembers = this.generateIncludeMembers(finalIncludes, cube.name, type);
+      const includeMembers = this.generateIncludeMembers(cubeIncludes, type, cube, viewAllMembers);
       this.applyIncludeMembers(includeMembers, cube, type, errorReporter);
 
-      cube.includedMembers = [...(cube.includedMembers || []), ...Array.from(new Set(finalIncludes.map((it: any) => {
-        const split = it.member.split('.');
-        const memberPath = this.pathFromArray([split[split.length - 2], split[split.length - 1]]);
-        return {
-          type,
-          memberPath,
-          name: it.name
-        };
-      })))];
+      const existing = cube.includedMembers ?? [];
+      const seen = new Set(
+        existing.map(({ type: t, memberPath, name }) => `${t}|${memberPath}|${name}`)
+      );
+
+      const additions: ViewIncludedMember[] = [];
+
+      for (const { member, name } of cubeIncludes) {
+        const parts = member.split('.');
+        const memberPath = this.pathFromArray(parts.slice(-2));
+        const key = `${type}|${memberPath}|${name}`;
+
+        if (!seen.has(key)) {
+          seen.add(key);
+          additions.push({ type, memberPath, name });
+        }
+      }
+
+      if (additions.length) {
+        cube.includedMembers = [...existing, ...additions];
+      }
     }
+
+    cube.joinMap = joinMap;
 
     [...memberSets.allMembers].filter(it => !memberSets.resolvedMembers.has(it)).forEach(it => {
       errorReporter.error(`Member '${it}' is included in '${cube.name}' but not defined in any cube`);
@@ -362,63 +676,104 @@ export class CubeSymbols {
     for (const [memberName, memberDefinition] of includeMembers) {
       if (cube[type]?.[memberName]) {
         errorReporter.error(`Included member '${memberName}' conflicts with existing member of '${cube.name}'. Please consider excluding this member or assigning it an alias.`);
-      } else if (type !== 'hierarchies') {
+      } else {
         cube[type][memberName] = memberDefinition;
       }
     }
   }
 
-  protected membersFromCubes(parentCube: CubeDefinition, cubes: any[], type: string, errorReporter: ErrorReporter, splitViews: SplitViews, memberSets: any) {
-    return R.unnest(cubes.map(cubeInclude => {
-      const fullPath = this.evaluateReferences(null, cubeInclude.joinPath, { collectJoinHints: true });
+  protected membersFromCubes(
+    parentCube: CubeDefinition,
+    cubes: any[],
+    type: string,
+    errorReporter: ErrorReporter,
+    splitViews: SplitViews,
+    memberSets: MemberSets
+  ): ViewResolvedMember[] {
+    const result: ViewResolvedMember[] = [];
+    const seen = new Set<string>();
+
+    for (const cubeInclude of cubes) {
+      const fullPath = this.evaluateReferences(
+        null,
+        // TODO recheck `cubeInclude.joinPath` typing
+        cubeInclude.joinPath as () => ToString,
+        { collectJoinHints: true }
+      );
+
       const split = fullPath.split('.');
       const cubeReference = split[split.length - 1];
       const cubeName = cubeInclude.alias || cubeReference;
 
-      let includes;
       const fullMemberName = (memberName: string) => (cubeInclude.prefix ? `${cubeName}_${memberName}` : memberName);
+
+      let includes: any[];
 
       if (cubeInclude.includes === '*') {
         const membersObj = this.symbols[cubeReference]?.cubeObj()?.[type] || {};
-        includes = Object.keys(membersObj).map(memberName => ({ member: `${fullPath}.${memberName}`, name: fullMemberName(memberName) }));
+        includes = Object.keys(membersObj).map((memberName) => ({
+          member: `${fullPath}.${memberName}`,
+          name: fullMemberName(memberName),
+        }));
       } else {
         includes = cubeInclude.includes.map((include: any) => {
-          const member = include.alias || include;
+          const member = include.alias || include.name || include;
 
           if (member.includes('.')) {
-            errorReporter.error(`Paths aren't allowed in cube includes but '${member}' provided as include member`);
+            errorReporter.error(
+              `Paths aren't allowed in cube includes but '${member}' provided as include member`
+            );
           }
 
-          const name = fullMemberName(include.alias || member);
+          const name = fullMemberName(member);
           memberSets.allMembers.add(name);
 
           const includedMemberName = include.name || include;
 
-          const resolvedMember = this.getResolvedMember(type, cubeReference, includedMemberName) ? {
+          const resolved = this.getResolvedMember(
+            type,
+            cubeReference,
+            includedMemberName
+          );
+
+          if (!resolved) return undefined;
+
+          memberSets.resolvedMembers.add(name);
+
+          const override = (include.title || include.description || include.format || include.meta)
+            ? {
+              title: include.title,
+              description: include.description,
+              format: include.format,
+              meta: include.meta,
+            }
+            : undefined;
+
+          return {
             member: `${fullPath}.${includedMemberName}`,
             name,
-          } : undefined;
-
-          if (resolvedMember) {
-            memberSets.resolvedMembers.add(name);
-          }
-
-          return resolvedMember;
+            ...(override ? { override } : {}),
+          };
         });
       }
 
-      const excludes = (cubeInclude.excludes || []).map((exclude: any) => {
-        if (exclude.includes('.')) {
-          errorReporter.error(`Paths aren't allowed in cube excludes but '${exclude}' provided as exclude member`);
-        }
+      const excludes = (cubeInclude.excludes || [])
+        .map((exclude: any) => {
+          if (exclude.includes('.')) {
+            errorReporter.error(
+              `Paths aren't allowed in cube excludes but '${exclude}' provided as exclude member`
+            );
+          }
 
-        const resolvedMember = this.getResolvedMember(type, cubeReference, exclude);
-        return resolvedMember ? {
-          member: `${fullPath}.${exclude}`
-        } : undefined;
-      });
+          const resolved = this.getResolvedMember(type, cubeReference, exclude);
+          return resolved ? { member: `${fullPath}.${exclude}` } : undefined;
+        })
+        .filter(Boolean);
 
-      const finalIncludes = this.diffByMember(includes.filter(Boolean), excludes.filter(Boolean));
+      const finalIncludes = this.diffByMember(
+        includes.filter(Boolean),
+        excludes
+      );
 
       if (cubeInclude.split) {
         const viewName = `${parentCube.name}_${cubeName}`;
@@ -433,17 +788,24 @@ export class CubeSymbols {
           splitViewDef = splitViews[viewName];
         }
 
-        const includeMembers = this.generateIncludeMembers(finalIncludes, parentCube.name, type);
+        const viewAllMembers: ViewResolvedMember[] = [];
+        const includeMembers = this.generateIncludeMembers(finalIncludes, type, splitViewDef, viewAllMembers);
         this.applyIncludeMembers(includeMembers, splitViewDef, type, errorReporter);
-
-        return [];
       } else {
-        return finalIncludes;
+        for (const member of finalIncludes) {
+          const key = `${member.member}|${member.name}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            result.push(member);
+          }
+        }
       }
-    }));
+    }
+
+    return result;
   }
 
-  protected diffByMember(includes: any[], excludes: any[]) {
+  protected diffByMember(includes: ViewResolvedMember[], excludes: ViewExcludedMember[]) {
     const excludesMap = new Map();
 
     for (const exclude of excludes) {
@@ -453,32 +815,44 @@ export class CubeSymbols {
     return includes.filter(include => !excludesMap.has(include.member));
   }
 
-  protected membersFromIncludeExclude(referencesFn: any, cubeName: string, type: string) {
-    const references = this.evaluateReferences(cubeName, referencesFn);
-    return R.unnest(references.map((ref: string) => {
-      const path = ref.split('.');
-      if (path.length === 1) {
-        const membersObj = this.symbols[path[0]]?.cubeObj()?.[type] || {};
-        return Object.keys(membersObj).map(memberName => ({ member: `${ref}.${memberName}` }));
-      } else if (path.length === 2) {
-        const resolvedMember = this.getResolvedMember(type, path[0], path[1]);
-        return resolvedMember ? [{ member: ref }] : undefined;
-      } else {
-        throw new Error(`Unexpected path length ${path.length} for ${ref}`);
-      }
-    })).filter(Boolean);
-  }
-
   protected getResolvedMember(type: string, cubeName: string, memberName: string) {
     return this.symbols[cubeName]?.cubeObj()?.[type]?.[memberName];
   }
 
-  protected generateIncludeMembers(members: any[], cubeName: string, type: string) {
+  protected generateIncludeMembers(members: any[], type: string, targetCube: CubeDefinitionExtended, viewAllMembers: ViewResolvedMember[]) {
     return members.map(memberRef => {
       const path = memberRef.member.split('.');
       const resolvedMember = this.getResolvedMember(type, path[path.length - 2], path[path.length - 1]);
       if (!resolvedMember) {
         throw new Error(`Can't resolve '${memberRef.member}' while generating include members`);
+      }
+
+      let processedDrillMembers = resolvedMember.drillMembers;
+
+      // We need to filter only included drillMembers for views
+      if (type === 'measures' && resolvedMember.drillMembers && targetCube.isView) {
+        const sourceCubeName = path[path.length - 2];
+
+        const evaluatedDrillMembers = this.evaluateReferences(
+          sourceCubeName,
+          resolvedMember.drillMembers,
+          { originalSorting: true }
+        );
+
+        const drillMembersArray = (Array.isArray(evaluatedDrillMembers)
+          ? evaluatedDrillMembers
+          : [evaluatedDrillMembers]);
+
+        const filteredDrillMembers = drillMembersArray.flatMap(member => {
+          const found = viewAllMembers.find(v => v.member.endsWith(member));
+          if (!found) {
+            return [];
+          }
+
+          return [`${targetCube.name}.${found.name}`];
+        });
+
+        processedDrillMembers = () => filteredDrillMembers;
       }
 
       // eslint-disable-next-line no-new-func
@@ -487,32 +861,40 @@ export class CubeSymbols {
       if (type === 'measures') {
         memberDefinition = {
           sql,
-          type: BaseQuery.toMemberDataType(resolvedMember.type),
+          type: CubeSymbols.toMemberDataType(resolvedMember.type),
           aggType: resolvedMember.type,
-          meta: resolvedMember.meta,
-          title: resolvedMember.title,
-          description: resolvedMember.description,
-          format: resolvedMember.format,
+          meta: memberRef.override?.meta || resolvedMember.meta,
+          title: memberRef.override?.title || resolvedMember.title,
+          description: memberRef.override?.description || resolvedMember.description,
+          format: memberRef.override?.format || resolvedMember.format,
+          ...(resolvedMember.multiStage && { multiStage: resolvedMember.multiStage }),
+          ...(resolvedMember.timeShift && { timeShift: resolvedMember.timeShift }),
+          ...(resolvedMember.orderBy && { orderBy: resolvedMember.orderBy }),
+          ...(processedDrillMembers && { drillMembers: processedDrillMembers }),
+          ...(resolvedMember.drillMembersGrouped && { drillMembersGrouped: resolvedMember.drillMembersGrouped }),
         };
       } else if (type === 'dimensions') {
         memberDefinition = {
-          ...(resolvedMember.granularities ? { granularities: resolvedMember.granularities } : {}),
           sql,
           type: resolvedMember.type,
-          meta: resolvedMember.meta,
-          title: resolvedMember.title,
-          description: resolvedMember.description,
-          format: resolvedMember.format,
+          meta: memberRef.override?.meta || resolvedMember.meta,
+          title: memberRef.override?.title || resolvedMember.title,
+          description: memberRef.override?.description || resolvedMember.description,
+          format: memberRef.override?.format || resolvedMember.format,
+          ...(resolvedMember.granularities ? { granularities: resolvedMember.granularities } : {}),
+          ...(resolvedMember.multiStage && { multiStage: resolvedMember.multiStage }),
         };
       } else if (type === 'segments') {
         memberDefinition = {
           sql,
-          meta: resolvedMember.meta,
-          description: resolvedMember.description,
+          meta: memberRef.override?.meta || resolvedMember.meta,
+          description: memberRef.override?.description || resolvedMember.description,
+          title: memberRef.override?.title || resolvedMember.title,
+          aliases: resolvedMember.aliases,
         };
       } else if (type === 'hierarchies') {
         memberDefinition = {
-          title: resolvedMember.title,
+          title: memberRef.override?.title || resolvedMember.title,
           levels: resolvedMember.levels,
         };
       } else {
@@ -524,7 +906,7 @@ export class CubeSymbols {
 
   /**
    * This method is mainly used for evaluating RLS conditions and filters.
-   * It allows referencing security_context (lowecase) in dynamic conditions or filter values.
+   * It allows referencing security_context (lowercase) in dynamic conditions or filter values.
    *
    * It currently does not support async calls because inner resolveSymbol and
    * resolveSymbolsCall are sync. Async support may be added later with deeper
@@ -533,7 +915,7 @@ export class CubeSymbols {
   protected evaluateContextFunction(cube: any, contextFn: any, context: any = {}) {
     const cubeEvaluator = this;
 
-    const res = cubeEvaluator.resolveSymbolsCall(contextFn, (name: string) => {
+    return cubeEvaluator.resolveSymbolsCall(contextFn, (name: string) => {
       const resolvedSymbol = this.resolveSymbol(cube, name);
       if (resolvedSymbol) {
         return resolvedSymbol;
@@ -546,11 +928,14 @@ export class CubeSymbols {
         securityContext: context.securityContext,
       }
     });
-
-    return res;
   }
 
-  protected evaluateReferences(cube, referencesFn, options: any = {}) {
+  protected evaluateReferences<T extends ToString | Array<ToString>>(
+    cube: string | null,
+    referencesFn: (...args: Array<unknown>) => T,
+    options: { collectJoinHints?: boolean, originalSorting?: boolean } = {}
+  ):
+  T extends Array<ToString> ? Array<string> : T extends ToString ? string : string | Array<string> {
     const cubeEvaluator = this;
 
     const fullPath = (joinHints, path) => {
@@ -561,7 +946,7 @@ export class CubeSymbols {
       }
     };
 
-    const arrayOrSingle = cubeEvaluator.resolveSymbolsCall(referencesFn, (name) => {
+    const arrayOrSingle: T = cubeEvaluator.resolveSymbolsCall(referencesFn, (name) => {
       const referencedCube = cubeEvaluator.symbols[name] && name || cube;
       const resolvedSymbol =
         cubeEvaluator.resolveSymbol(
@@ -569,38 +954,67 @@ export class CubeSymbols {
           name
         );
       // eslint-disable-next-line no-underscore-dangle
-      // if (resolvedSymbol && resolvedSymbol._objectWithResolvedProperties) {
-      if (resolvedSymbol._objectWithResolvedProperties) {
+      if (resolvedSymbol?._objectWithResolvedProperties) {
         return resolvedSymbol;
       }
       return cubeEvaluator.pathFromArray(fullPath(cubeEvaluator.joinHints(), [referencedCube, name]));
     }, {
       // eslint-disable-next-line no-shadow
-      sqlResolveFn: (symbol, currentCube, n) => cubeEvaluator.pathFromArray(fullPath(cubeEvaluator.joinHints(), [currentCube, n])),
+      sqlResolveFn: (symbol, currentCube, refProperty, propertyName) => cubeEvaluator.pathFromArray(fullPath(cubeEvaluator.joinHints(), [currentCube, refProperty, ...(propertyName ? [propertyName] : [])])),
       // eslint-disable-next-line no-shadow
       cubeAliasFn: (currentCube) => cubeEvaluator.pathFromArray(fullPath(cubeEvaluator.joinHints(), [currentCube])),
       collectJoinHints: options.collectJoinHints,
     });
     if (!Array.isArray(arrayOrSingle)) {
-      return arrayOrSingle.toString();
+      // arrayOrSingle is of type `T`, and we just checked that it is not an array
+      // Which means it `T` be an object with `toString`, and result must be `string`
+      // For any branch of return type that can can contain just an object it's OK to return string
+      return arrayOrSingle.toString() as any;
     }
 
-    const references = arrayOrSingle.map(p => p.toString());
-    return options.originalSorting ? references : R.sortBy(R.identity, references);
+    const references: Array<string> = arrayOrSingle.map(p => p.toString());
+    // arrayOrSingle is of type `T`, and we just checked that it is an array
+    // Which means that both `T` and result must be arrays
+    // For any branch of return type that can contain array it's OK to return array
+    return options.originalSorting ? references : R.sortBy(R.identity, references) as any;
   }
 
-  public pathFromArray(array) {
+  public pathFromArray(array: string[]): string {
     return array.join('.');
   }
 
-  protected resolveSymbolsCall(func, nameResolver, context?: any) {
+  /**
+   * Split join path to member to join hint and member path: `A.B.C.D.E.dim` => `[A, B, C, D, E]` + `E.dim`
+   */
+  public static joinHintFromPath(path: string): { path: string, joinHint: string[] } {
+    const parts = path.split('.');
+    if (parts.length > 2) {
+      // Path contains join path
+      const joinHint = parts.slice(0, -1);
+      return {
+        path: parts.slice(-2).join('.'),
+        joinHint,
+      };
+    } else {
+      return {
+        path,
+        joinHint: [],
+      };
+    }
+  }
+
+  protected resolveSymbolsCall<T>(
+    func: (...args: Array<unknown>) => T | DynamicReference<T>,
+    nameResolver: (id: string) => unknown,
+    context?: unknown,
+  ): T {
     const oldContext = this.resolveSymbolsCallContext;
     this.resolveSymbolsCallContext = context;
     try {
       // eslint-disable-next-line prefer-spread
-      let res = func.apply(null, this.funcArguments(func).map((id) => nameResolver(id.trim())));
+      const res = func.apply(null, this.funcArguments(func).map((id) => nameResolver(id.trim())));
       if (res instanceof DynamicReference) {
-        res = res.fn.apply(null, res.memberNames.map((id) => nameResolver(id.trim())));
+        return res.fn.apply(null, res.memberNames.map((id) => nameResolver(id.trim())));
       }
       return res;
     } finally {
@@ -608,7 +1022,7 @@ export class CubeSymbols {
     }
   }
 
-  protected withSymbolsCallContext(func, context) {
+  protected withSymbolsCallContext(func: Function, context) {
     const oldContext = this.resolveSymbolsCallContext;
     this.resolveSymbolsCallContext = context;
     try {
@@ -618,7 +1032,7 @@ export class CubeSymbols {
     }
   }
 
-  protected funcArguments(func) {
+  public funcArguments(func: Function): string[] {
     const funcDefinition = func.toString();
     if (!this.funcArgumentsValues[funcDefinition]) {
       const match = funcDefinition.match(FunctionRegex);
@@ -633,54 +1047,51 @@ export class CubeSymbols {
     return this.funcArgumentsValues[funcDefinition];
   }
 
-  protected joinHints() {
+  protected joinHints(): string | string[] | undefined {
     const { joinHints } = this.resolveSymbolsCallContext || {};
+    if (Array.isArray(joinHints)) {
+      return R.uniq(joinHints);
+    }
     return joinHints;
   }
 
   protected resolveSymbolsCallDeps(cubeName, sql) {
     try {
-      return this.resolveSymbolsCallDeps2(cubeName, sql);
+      const deps: any[] = [];
+      this.resolveSymbolsCall(sql, (name) => {
+        deps.push({ name });
+        const resolvedSymbol = this.resolveSymbol(
+          cubeName,
+          name
+        );
+        if (resolvedSymbol?._objectWithResolvedProperties) {
+          return resolvedSymbol;
+        }
+        return '';
+      }, {
+        depsResolveFn: (name, parent) => {
+          deps.push({ name, parent });
+          return deps.length - 1;
+        },
+        currResolveIndexFn: () => deps.length - 1,
+        contextSymbols: this.depsContextSymbols(),
+
+      });
+      return deps;
     } catch (e) {
-      console.log(e);
       return [];
     }
   }
 
-  protected resolveSymbolsCallDeps2(cubeName, sql) {
-    const deps: any[] = [];
-    this.resolveSymbolsCall(sql, (name) => {
-      deps.push({ name, undefined });
-      const resolvedSymbol = this.resolveSymbol(
-        cubeName,
-        name
-      );
-      if (resolvedSymbol._objectWithResolvedProperties) {
-        return resolvedSymbol;
-      }
-      return '';
-    }, {
-      depsResolveFn: (name, parent) => {
-        deps.push({ name, parent });
-        return deps.length - 1;
-      },
-      currResolveIndexFn: () => deps.length - 1,
-      contextSymbols: this.depsContextSymbols(),
-
-    });
-    return deps;
-  }
-
   protected depsContextSymbols() {
-    return Object.assign({
+    return {
       filterParams: this.filtersProxyDep(),
       filterGroup: this.filterGroupFunctionDep(),
-      securityContext: BaseQuery.contextSymbolsProxyFrom({}, (param) => param),
+      securityContext: CubeSymbols.contextSymbolsProxyFrom({}, (param) => param),
       sqlUtils: {
         convertTz: (f) => f
-
       },
-    });
+    };
   }
 
   protected filtersProxyDep() {
@@ -717,16 +1128,15 @@ export class CubeSymbols {
     return (...filterParamArgs) => '';
   }
 
-  public resolveSymbol(cubeName, name) {
+  public resolveSymbol(cubeName, name: string) {
     const { sqlResolveFn, contextSymbols, collectJoinHints, depsResolveFn, currResolveIndexFn } = this.resolveSymbolsCallContext || {};
-
     if (name === 'USER_CONTEXT') {
       throw new Error('Support for USER_CONTEXT was removed, please migrate to SECURITY_CONTEXT.');
     }
 
     if (CONTEXT_SYMBOLS[name]) {
       // always resolves if contextSymbols aren't passed for transpile step
-      const symbol = contextSymbols && contextSymbols[CONTEXT_SYMBOLS[name]] || {};
+      const symbol = contextSymbols?.[CONTEXT_SYMBOLS[name]] || {};
       // eslint-disable-next-line no-underscore-dangle
       symbol._objectWithResolvedProperties = true;
       return symbol;
@@ -748,7 +1158,7 @@ export class CubeSymbols {
       } else if (this.symbols[cubeName]?.[name]) {
         cube = this.cubeReferenceProxy(
           cubeName,
-          undefined,
+          collectJoinHints ? [] : undefined,
           name
         );
       }
@@ -758,9 +1168,12 @@ export class CubeSymbols {
         const parentIndex = currResolveIndexFn();
         cube = this.cubeDependenciesProxy(parentIndex, newCubeName);
         return cube;
+      } else if (this.symbols[cubeName]?.[name] && this.symbols[cubeName][name].type === 'time') {
+        const parentIndex = currResolveIndexFn();
+        return this.timeDimDependenciesProxy(parentIndex);
       }
     }
-    return cube || (this.symbols[cubeName] && this.symbols[cubeName][name]);
+    return cube || this.symbols[cubeName]?.[name];
   }
 
   protected cubeReferenceProxy(cubeName, joinHints?: any[], refProperty?: any) {
@@ -821,8 +1234,10 @@ export class CubeSymbols {
             ),
           };
         }
-        if (cube[propertyName]) {
-          return this.cubeReferenceProxy(cubeName, joinHints, propertyName);
+        if (cube[propertyName as string]) {
+          // We put cubeName at the beginning of the cubeReferenceProxy(), no need to add it again
+          // so let's cut it off from joinHints
+          return this.cubeReferenceProxy(cubeName, joinHints?.slice(0, -1), propertyName);
         }
         if (self.symbols[propertyName]) {
           return this.cubeReferenceProxy(propertyName, joinHints);
@@ -845,12 +1260,21 @@ export class CubeSymbols {
     const [cubeName, dimName, gr, granName] = Array.isArray(path) ? path : path.split('.');
     const cube = refCube || this.symbols[cubeName];
 
-    // Predefined granularity
+    // Calendar cubes time dimensions may define custom sql for predefined granularities,
+    // so we need to check if such granularity exists in cube definition.
     if (typeof granName === 'string' && /^(second|minute|hour|day|week|month|quarter|year)$/i.test(granName)) {
+      const customGranularity = cube?.[dimName]?.[gr]?.[granName];
+      if (customGranularity) {
+        return {
+          ...customGranularity,
+          interval: `1 ${granName}`, // It's still important to have interval for granularity math
+        };
+      }
+
       return { interval: `1 ${granName}` };
     }
 
-    return cube && cube[dimName] && cube[dimName][gr] && cube[dimName][gr][granName];
+    return cube?.[dimName]?.[gr]?.[granName];
   }
 
   protected cubeDependenciesProxy(parentIndex, cubeName) {
@@ -875,8 +1299,12 @@ export class CubeSymbols {
         if (propertyName === '_objectWithResolvedProperties') {
           return true;
         }
-        if (cube[propertyName]) {
-          depsResolveFn(propertyName, parentIndex);
+        if (cube[propertyName as string]) {
+          const index = depsResolveFn(propertyName, parentIndex);
+          if (cube[propertyName as string].type === 'time') {
+            return this.timeDimDependenciesProxy(index);
+          }
+
           return '';
         }
         if (self.symbols[propertyName]) {
@@ -891,7 +1319,71 @@ export class CubeSymbols {
     });
   }
 
+  protected timeDimDependenciesProxy(parentIndex) {
+    const self = this;
+    const { depsResolveFn } = self.resolveSymbolsCallContext || {};
+    return new Proxy({}, {
+      get: (v, propertyName) => {
+        if (propertyName === '_objectWithResolvedProperties') {
+          return true;
+        }
+        if (propertyName === 'toString') {
+          return () => '';
+        }
+        if (typeof propertyName === 'string') {
+          depsResolveFn(propertyName, parentIndex);
+        }
+        return undefined;
+      }
+    });
+  }
+
   public isCurrentCube(name) {
     return CURRENT_CUBE_CONSTANTS.indexOf(name) >= 0;
+  }
+
+  public static isCalculatedMeasureType(type: string): boolean {
+    return type === 'number' || type === 'string' || type === 'time' || type === 'boolean';
+  }
+
+  /**
+   TODO: support type qualifiers on min and max
+   */
+  public static toMemberDataType(type: string): string {
+    return this.isCalculatedMeasureType(type) ? type : 'number';
+  }
+
+  public static contextSymbolsProxyFrom(symbols: object, allocateParam: (param: unknown) => unknown): object {
+    return new Proxy(symbols, {
+      get: (target, name) => {
+        const propValue = target[name];
+        const methods = (paramValue) => ({
+          filter: (column) => {
+            if (paramValue) {
+              const value = Array.isArray(paramValue) ?
+                paramValue.map(allocateParam) :
+                allocateParam(paramValue);
+              if (typeof column === 'function') {
+                return column(value);
+              } else {
+                return `${column} = ${value}`;
+              }
+            } else {
+              return '1 = 1';
+            }
+          },
+          requiredFilter: (column) => {
+            if (!paramValue) {
+              throw new UserError(`Filter for ${column} is required`);
+            }
+            return methods(paramValue).filter(column);
+          },
+          unsafeValue: () => paramValue
+        });
+        return methods(target)[name] ||
+          typeof propValue === 'object' && propValue !== null && CubeSymbols.contextSymbolsProxyFrom(propValue, allocateParam) ||
+          methods(propValue);
+      }
+    });
   }
 }

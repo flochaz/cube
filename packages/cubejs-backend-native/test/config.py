@@ -1,4 +1,5 @@
 from cube import config, file_repository
+from utils import test_function
 
 config.schema_path = "models"
 config.pg_sql_port = 5555
@@ -7,6 +8,7 @@ config.telemetry = False
 
 @config
 def query_rewrite(query, ctx):
+    query = test_function(query)
     print("[python] query_rewrite query=", query, " ctx=", ctx)
     return query
 
@@ -103,4 +105,14 @@ def context_to_roles(ctx):
 
     return [
         "admin",
+    ]
+
+
+@config
+def context_to_groups(ctx):
+    print("[python] context_to_groups", ctx)
+
+    return [
+        "dev",
+        "analytics",
     ]

@@ -1,7 +1,9 @@
 module.exports = {
   "calculated-members": "Calculated members",
-  "code-reusability-extending-cubes": "Extending cubes",
+  "multi-stage-calculations": "Multi-stage calculations",
+  "working-with-joins": "Joins between cubes",
+  "calendar-cubes": "Calendar cubes",
+  "code-reusability-extending-cubes": "Extension",
   "polymorphic-cubes": "Polymorphic cubes",
-  "data-blending": "Data blending",
-  "working-with-joins": "Working with joins"
+  "data-blending": "Data blending"
 }

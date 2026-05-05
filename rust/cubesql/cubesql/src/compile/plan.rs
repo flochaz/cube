@@ -12,7 +12,7 @@ use datafusion::{
     logical_plan::LogicalPlan,
     physical_plan::{ExecutionPlan, RecordBatchStream},
 };
-use futures_util::FutureExt;
+use futures::FutureExt;
 
 bitflags! {
     pub struct StatusFlags: u8 {
@@ -28,6 +28,8 @@ pub enum CommandCompletion {
     Commit,
     Use,
     Rollback,
+    Savepoint,
+    Release,
     Set,
     Select(u32),
     DeclareCursor,
